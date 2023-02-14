@@ -1,0 +1,7 @@
+setup.py
+xbpy/__init__.py
+xbpy.egg-info/PKG-INFO
+xbpy.egg-info/SOURCES.txt
+xbpy.egg-info/dependency_links.txt
+xbpy.egg-info/not-zip-safe
+xbpy.egg-info/top_level.txt
