@@ -1,3 +1,7 @@
+from rdkit.Chem import rdMolTransforms
+import numpy as np
+
+
 def position(atom, conformer = 0):
     """Return the position of the given atom.
 
@@ -22,3 +26,10 @@ def position(atom, conformer = 0):
             return np.array([conformer.GetAtomPosition(a.GetIdx()) for a in atom])
     else:
         return np.array(atom.GetOwningMol().GetConformer(conformer).GetAtomPosition(atom.GetIdx()))
+
+
+def transform(mol, rotation, translation):
+    transformation = np.eye(4)
+    transformation[:3, :3] = rotation
+    transformation[:3, 3] = translation
+    rdMolTransforms.TransformConformer(mol.GetConformer(), transformation)

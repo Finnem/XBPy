@@ -1,3 +1,6 @@
+import numpy as np
+
+
 def remove_atoms(mol, atoms):
     """Remove the given atoms from the molecule.
     
@@ -9,7 +12,6 @@ def remove_atoms(mol, atoms):
         RDKit.Mol: Molecule with the given atoms removed.
         
     """
-    import numpy as np
     import rdkit.Chem as Chem
     from .geometry import position
 
@@ -56,3 +58,18 @@ def keep_atoms(mol, atoms):
             indices.add(atom.GetIdx())
     to_remove = all_atom_indices - indices
     return remove_atoms(mol, to_remove)
+
+
+def copy_props(mol_from, mol_to, replace_dict = None):
+    if replace_dict is None:
+        replace_dict = {}
+
+    for key, prop in mol_from.GetPropsAsDict().items():
+        if key in replace_dict:
+            key = replace_dict[key]
+        if np.issubdtype(type(prop), np.integer):
+            mol_to.SetIntProp(key, prop)
+        elif np.issubdtype(type(prop), np.floating):
+            mol_to.SetDoubleProp(key, prop)
+        elif isinstance(type(prop), str):
+            mol_to.SetProp(key, prop)

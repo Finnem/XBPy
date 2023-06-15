@@ -1,5 +1,6 @@
 from rdkit import Chem
 from .indexing_functionality import Molecule
+from tqdm import tqdm
 
 def mapping_sdf(file_path: str, restart_index = False, method: str = 'morgan') -> dict:
     '''
@@ -14,24 +15,22 @@ def mapping_sdf(file_path: str, restart_index = False, method: str = 'morgan') -
     '''
     molecules = {}
     # read file
-    with Chem.ForwardSDMolSupplier(file_path, sanitize = False, removeHs=False) as supply:
-        # loop mol blocks
-        for mol in supply:
-            if mol is None: continue
-            # create object and use enumeration method
-            name = mol.GetProp('_Name')
-            molecule_object = Molecule.from_Mol(name,mol)
-            if method == 'morgan':
-                molecule_object.morgan(reset=restart_index)
-                molecule_object.draw_graph('unique_index')
-                break
-            elif method == 'pairs':
-                molecule_object.pairs_method(reset=restart_index)
-            elif method == 'spanning_tree':
-                molecule_object.spanning_tree_method(reset=restart_index)
-            else:
-                raise Exception(f'Method {method} is not a viable method')
-            molecules[name] = molecule_object.get_mapping()
+    supply = list()
+    # loop mol blocks
+    for i, mol in enumerate(Chem.ForwardSDMolSupplier(file_path, sanitize = False, removeHs=False)):
+        if mol is None: continue
+        # create object and use enumeration method
+        name = i
+        molecule_object = Molecule.from_Mol(name,mol)
+        if method == 'morgan':
+            molecule_object.morgan(reset=restart_index)
+        elif method == 'pairs':
+            molecule_object.pairs_method(reset=restart_index)
+        elif method == 'spanning_tree':
+            molecule_object.spanning_tree_method(reset=restart_index)
+        else:
+            raise Exception(f'Method {method} is not a viable method')
+        molecules[name] = molecule_object.get_mapping()
     return molecules
 
 def mapping_xyz(file_path: str, restart_index = True, method: str = 'morgan') -> dict:

@@ -21,6 +21,7 @@ class Molecule:
         self.ambiguity_rules = rule_dict()
         self.graph = nx.Graph()
         self.d_matrix = None
+        self.p_table = Chem.GetPeriodicTable()
         if file_type == 'Mol':
             self.graph = self.create_graph_from_mol()
             self.mapping = [None] * len(molecule_object.GetAtoms())
@@ -58,6 +59,18 @@ class Molecule:
         graph.add_nodes_from(nodes_to_add)
         graph.add_edges_from(edges)
         return graph
+
+    def subgraph_order(self, subgraphs):
+        sort_keys = []
+        for subgraph in subgraphs:
+            sort_key = []
+            for node in subgraph:
+                element = self.graph.nodes[node]['element']
+                sort_key.append(self.p_table.GetAtomicNumber(element))
+            sort_key.sort(reverse=True)
+            sort_keys.append((sort_key, subgraph))
+        sort_keys.sort(key=lambda x: x[0])
+        return [subgraph for _, subgraph in sort_keys]
 
     def create_graph_from_xyz(self):
         '''
@@ -133,7 +146,7 @@ class Molecule:
         center = [sum(center[i]) / len(center[i]) for i in range(0, 3)]
         return center
 
-    def relax(self, max_cycles =50000):
+    def relax(self, max_cycles =50):
         '''
         Does the Morgan relaxation step for a graph instance.
         :param max_cycles: max amount of relaxation cycles for latest termination
@@ -141,7 +154,7 @@ class Molecule:
         '''
         g = self.graph
         for node in g.nodes:
-            g.nodes[node]['EC_l'] = 1
+            g.nodes[node]['EC_l'] = self.p_table.GetAtomicNumber(g.nodes[node]['element'])
             g.nodes[node]['EC_c'] = 1
         number_l_labels = 1
         number_c_labels = 1
@@ -266,7 +279,8 @@ class Molecule:
         self.relax()
         nodes = self.graph.nodes
         start = 0
-        for g in sorted(nx.connected_components(self.graph), key = len, reverse=True):
+        sorted_components = self.subgraph_order(nx.connected_components(self.graph))
+        for i, g in enumerate(sorted_components):
             self.subgraph_morgan(g,C_start= start)
             if not reset:
                 start = start + len(g)
