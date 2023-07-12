@@ -1,7 +1,7 @@
 
 import logging
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, maximum = None, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
@@ -37,7 +37,8 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
                     if (f not in seen) and recursive:
                         remaining_paths.add(f)
                 else:
-                    path_molecules.extend(_read_molecules_file(f, store_path, reference_molecule, *args, **kwargs))
+                    used_maximum = None if maximum is None else maximum - (len(molecules) + len(path_molecules))
+                    path_molecules.extend(_read_molecules_file(f, store_path, reference_molecule, maximum = used_maximum, *args, **kwargs))
                     
             seen.add(p)
 
@@ -48,7 +49,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
     return molecules
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, maximum = None, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -101,6 +102,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, *ar
                 conformer = new_mol.GetConformer()
                 xyz_conformer = molecule.GetConformer()
                 conformer.SetAtomPosition(atom.GetIdx(), xyz_conformer.GetAtomPosition(atom.GetIdx()))
+                atom.SetAtomicNum(molecule.GetAtomWithIdx(atom.GetIdx()).GetAtomicNum())
             new_mols.append(new_mol)
         molecules = new_mols
 
@@ -138,10 +140,12 @@ def read_molecules_xyz(path, reference_molecule, *args, **kwargs):
                 conformer = molecule.GetConformer()
                 xyz_conformer = xyz_molecule.GetConformer()
                 conformer.SetAtomPosition(atom.GetIdx(), xyz_conformer.GetAtomPosition(atom.GetIdx()))
+                atom.SetAtomicNum(xyz_molecule.GetAtomWithIdx(atom.GetIdx()).GetAtomicNum())
 
 
     else:
         raise ValueError("File format not recognized. RDKit does not properly support mol2 files.")
+    
 
 
     return [molecule]
