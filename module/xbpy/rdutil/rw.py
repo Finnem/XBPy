@@ -17,7 +17,7 @@ def remove_atoms(mol, atoms):
 
     indices = []
     for atom in atoms:
-        if isinstance(atom, int):
+        if np.issubdtype(type(atom), np.integer):
             indices.append((atom, None))
         else:
             indices.append((atom.GetIdx(), atom))
@@ -52,7 +52,7 @@ def keep_atoms(mol, atoms):
     all_atom_indices = set([atom.GetIdx() for atom in mol.GetAtoms()])
     indices = set()
     for atom in atoms:
-        if isinstance(atom, int):
+        if np.issubdtype(type(atom), np.integer):
             indices.add(atom)
         else:
             indices.add(atom.GetIdx())
@@ -71,5 +71,5 @@ def copy_props(mol_from, mol_to, replace_dict = None):
             mol_to.SetIntProp(key, prop)
         elif np.issubdtype(type(prop), np.floating):
             mol_to.SetDoubleProp(key, prop)
-        elif isinstance(type(prop), str):
-            mol_to.SetProp(key, prop)
+        else:
+            mol_to.SetProp(str(key), prop)

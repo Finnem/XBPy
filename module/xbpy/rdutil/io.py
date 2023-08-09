@@ -1,7 +1,7 @@
 
 import logging
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, maximum = None, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, maximum = None, removeHs=False, sanitize=False, proximityBonding=False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
@@ -38,7 +38,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
                         remaining_paths.add(f)
                 else:
                     used_maximum = None if maximum is None else maximum - (len(molecules) + len(path_molecules))
-                    path_molecules.extend(_read_molecules_file(f, store_path, reference_molecule, maximum = used_maximum, *args, **kwargs))
+                    path_molecules.extend(_read_molecules_file(f, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, maximum = used_maximum, proximityBonding=proximityBonding, *args, **kwargs))
                     
             seen.add(p)
 
@@ -49,7 +49,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
     return molecules
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, maximum = None, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, maximum = None, proximityBonding=False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -66,7 +66,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, max
 
     molecules = []
     if os.path.splitext(path)[1] == ".pdb":
-        molecules = [Chem.rdmolfiles.MolFromPDBFile(path, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol":
         molecules = [Chem.rdmolfiles.MolFromMolFile(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".sdf":

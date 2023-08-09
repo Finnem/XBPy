@@ -16,7 +16,7 @@ def unique_index(mol):
     for connected_component in connected_components:
         original_scores.append(morgan_prop(mol, connected_component))
         # resolve ambiguities
-        order = rankdata(-original_scores[-1], method="min") - 1
+        order = rankdata(-np.round(original_scores[-1], 4), method="min") - 1
         orders.append(resolve_ambiguity([mol.GetAtomWithIdx(i) for i in connected_component], order))
 
     # sort connected components based on scores. For some reason, lexsort sorts from last to first
@@ -64,6 +64,15 @@ def morgan_prop(mol, indices = None):
     while last_unique != (last_unique := len(np.unique(element_vector))):
         element_vector = adjacency_matrix @ element_vector
     return element_vector
+
+def get_equivalent_atoms(mol, indices):
+    element_vector = morgan_prop(mol, indices)
+    order = rankdata(-np.round(element_vector, 4), method="min") - 1
+    result = []
+    unique_values, unique_counts = np.unique(order, return_counts=True)
+    for val in unique_values[unique_counts > 1]:
+        result.append(np.where(order == val)[0])
+    return result
 
 def resolve_ambiguity(atoms, order):
 
