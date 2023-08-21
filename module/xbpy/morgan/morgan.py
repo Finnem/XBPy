@@ -144,8 +144,6 @@ def substructure_match(mol1, mol2):
             if index in indexed_mol2: continue
             history_map2[tuple(history_vector[:-(i + 1)])].append(index)       
         
-
-
         for history_vector, indices in history_map1.items():
             if history_vector in history_map2:
                 target_indices = history_map2[history_vector]
