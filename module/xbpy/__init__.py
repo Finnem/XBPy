@@ -1,4 +1,4 @@
-from xbpy import rdutil
-from xbpy import morgan
-from xbpy import math
+from .rdutil import * 
+from .morgan import *
+from .math import *
 
