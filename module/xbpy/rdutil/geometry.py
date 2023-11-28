@@ -1,6 +1,7 @@
 from rdkit.Chem import rdMolTransforms
 from rdkit import Chem
 import numpy as np
+import logging
 
 
 def position(atom, conformer = 0):
@@ -37,10 +38,27 @@ def position(atom, conformer = 0):
         return np.array(conformer.GetAtomPosition(atom.GetIdx()))
 
 
-def transform(mol, rotation, translation):
-    transformation = np.eye(4)
-    transformation[:3, :3] = rotation
-    transformation[:3, 3] = translation
+def transform(mol, matrix, translation = None):
+    """
+    Transform the given molecule INPLACE by the given matrix and translation vector.
+    
+    Args:
+        mol (RDKit.Mol): Molecule to transform.
+        matrix (np.ndarray): Rotation matrix (3x3) or transformation matrix (4x4).
+        translation (np.ndarray): Translation vector (3x1).
+
+
+
+    """
+    if matrix.shape == (3,3):
+        transformation = np.eye(4)
+        transformation[:3, :3] = matrix
+        if translation is not None:
+            transformation[:3, 3] = translation
+    if matrix.shape == (4,4):
+        transformation = matrix
+        if translation is not None:
+            logging.warning("Translation vector was explicitly passed to transform, however the 4x4 transformation matrix already implies a translation. The passed translation vector will be ignored.")
     rdMolTransforms.TransformConformer(mol.GetConformer(), transformation)
 
 

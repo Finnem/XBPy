@@ -67,6 +67,8 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, max
     molecules = []
     if os.path.splitext(path)[1] == ".pdb":
         molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, *args, **kwargs)]
+    elif os.path.splitext(path)[1] == ".mol2":
+        molecules = [Chem.rdmolfiles.MolFromMol2File(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol":
         molecules = [Chem.rdmolfiles.MolFromMolFile(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".sdf":
@@ -74,7 +76,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, max
     elif os.path.splitext(path)[1] == ".xyz":
         molecules = read_molecules_xyz(path, reference_molecule, *args, **kwargs)
     else:
-        raise ValueError("File format not recognized. RDKit does not properly support mol2 files.")
+        raise ValueError("File format not recognized.")
 
     if store_path:
         new_mols = []
@@ -144,7 +146,7 @@ def read_molecules_xyz(path, reference_molecule, *args, **kwargs):
 
 
     else:
-        raise ValueError("File format not recognized. RDKit does not properly support mol2 files.")
+        raise ValueError("File format not recognized.")
     
 
 
