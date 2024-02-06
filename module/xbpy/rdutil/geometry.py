@@ -2,7 +2,23 @@ from rdkit.Chem import rdMolTransforms
 from rdkit import Chem
 import numpy as np
 import logging
+from scipy.spatial import cKDTree
 
+class AtomKDTree():
+    def __init__(self, atoms):
+        vdw_radii = np.array([Chem.GetPeriodicTable().GetRvdw(atom.GetAtomicNum()) for atom in atoms])
+        self.trees = []
+        for vdw_radius in np.unique(vdw_radii):
+            tree = cKDTree(position(atoms)[vdw_radii == vdw_radius])
+            self.trees.append((vdw_radius, tree))
+
+    def query_ball_point(self, points, radius):
+        indices = [set() for _ in range(len(points))]
+        for vdw_radius, tree in self.trees:
+            query_result = tree.query_ball_point(points, radius + vdw_radius)
+            for i, result in enumerate(query_result):
+                indices[i].update(result)
+        return indices
 
 def position(atom, conformer = 0):
     """Return the position of the given atom.
@@ -16,6 +32,10 @@ def position(atom, conformer = 0):
 
     """
     import numpy as np
+    try:
+        atom = list(atom)
+    except TypeError:
+        pass
     if isinstance(atom, list) or isinstance(atom, tuple) or isinstance(atom, np.ndarray):
         if not (type(conformer) == int):
             conformer = conformer
@@ -62,18 +82,19 @@ def transform(mol, matrix, translation = None):
     rdMolTransforms.TransformConformer(mol.GetConformer(), transformation)
 
 
-def check_occlusion(from_atoms, to_atoms, potential_occluders, return_occluders = False, ignore_outside = True):
+def check_occlusion(from_atoms, to_atoms, potential_occluders, return_occluders = False, ignore_outside = True, default_radius = 1):
     """
     Check if the bond between from_atoms and to_atoms is occluded by any of the atoms in potential_occluders.
     If return_occluders is True, return the occluding atoms. An atom is considered occluding the bond between two other atoms if its van-der-waals radius is larger than its distance to the bond.
     The bonds are assumed to be between the atoms at the same index in from_atoms and to_atoms.
 
     Args:
-        from_atoms (list): List of atoms at the start of the bonds.
-        to_atoms (list): List of atoms at the end of the bonds.
-        potential_occluders (list): List of atoms that could occlude the bonds.
+        from_atoms (list): List of atoms at the start of the bonds. Alteratively, a position array can be passed. Then the default radius will be used for the atoms.
+        to_atoms (list): List of atoms at the end of the bonds. Alteratively, a position array can be passed. Then the default radius will be used for the atoms.
+        potential_occluders (list): List of atoms that could occlude the bonds. Alteratively, a position array can be passed. Then the default radius will be used for the atoms.
         return_occluders (bool): Defaults to False. If True, return a boolean array marking each occluding atom for each bond.
         ignore_outside (bool): Defaults to True. If True, only consider atoms that are between the two atoms of the bond.
+        default_radius (float): Defaults to 1. If ignore_outside is True, use this radius for atoms outside the bond.
 
     Returns:
         boolean array for each bond, whether it is occluded or not.
@@ -91,12 +112,24 @@ def check_occlusion(from_atoms, to_atoms, potential_occluders, return_occluders 
     
 
     # determine values required for the computation: positions and van-der-waals radii of the participating atoms
-    from_positions = position(from_atoms)
-    from_vdw = np.array([periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in from_atoms])
-    to_positions = position(to_atoms)
-    to_vdw = np.array([periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in to_atoms])
-    occluders_positions = position(potential_occluders)
-    occluders_vdw = np.array([periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in potential_occluders])
+    if isinstance(from_atoms, np.ndarray) and (len(from_atoms.shape) == 2) and (from_atoms.shape[1] == 3):
+        from_positions = from_atoms
+        from_vdw = np.full(len(from_atoms), default_radius)
+    else:
+        from_positions = position(from_atoms)
+        from_vdw = np.array([periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in from_atoms])
+    if isinstance(to_atoms, np.ndarray) and (len(to_atoms.shape) == 2) and (to_atoms.shape[1] == 3):
+        to_positions = to_atoms
+        to_vdw = np.full(len(to_atoms), default_radius)
+    else:
+        to_positions = position(to_atoms)
+        to_vdw = np.array([periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in to_atoms])
+    if isinstance(potential_occluders, np.ndarray) and (len(potential_occluders.shape) == 2) and (potential_occluders.shape[1] == 3):
+        occluders_positions = potential_occluders
+        occluders_vdw = np.full(len(potential_occluders), default_radius)
+    else:
+        occluders_positions = position(potential_occluders)
+        occluders_vdw = np.array([periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in potential_occluders])
 
     # for each of the bonds, determine the direction and the projection of the atoms onto the bond
     bond_directions = to_positions - from_positions; bond_directions /= np.linalg.norm(bond_directions, axis = 1)[:, None]

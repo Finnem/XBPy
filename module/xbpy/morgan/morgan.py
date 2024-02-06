@@ -51,7 +51,7 @@ def _connected_components(mol):
         components.append(list(component))
     return components
 
-def morgan_prop(mol, indices = None, return_history = False):
+def morgan_prop(mol, indices = None, return_history = False, just_topology = False):
     if indices is None:
         indices = list(range(mol.GetNumAtoms()))
     
@@ -65,7 +65,7 @@ def morgan_prop(mol, indices = None, return_history = False):
     np.seterr(invalid=old_err)
     adjacency_matrix = np.nan_to_num(adjacency_matrix, nan=0)
     adjacency_matrix += np.eye(adjacency_matrix.shape[0], dtype=int)
-    element_vector = np.array([a.GetAtomicNum() for a in atoms], dtype = float)
+    element_vector = np.ones(len(atoms)) if just_topology else np.array([a.GetAtomicNum() for a in atoms], dtype = float)
     last_unique = None
     if return_history: history = [np.zeros(len(atoms)), element_vector]
     while last_unique != (last_unique := len(np.unique(element_vector))):
@@ -122,6 +122,7 @@ def resolve_ambiguity(atoms, order, ambiguous_indices = None):
         for val in unique_vals[unique_counts > 1]:
             next_indices = np.where(order == val)[0]
             order[next_indices] += _resolve_ambiguity(next_indices, len(sorted_indices) - 1)
+            sorted_indices = np.argsort(order)
     
     else:
         return _resolve_ambiguity(ambiguous_indices, len(sorted_indices) - 1)
@@ -131,6 +132,7 @@ def resolve_ambiguity(atoms, order, ambiguous_indices = None):
 def substructure_match(mol1, mol2):
     mol1_history = morgan_prop(mol1, return_history=True)
     mol2_history = morgan_prop(mol2, return_history=True)
+    print(mol1_history, mol2_history)
     index_map = {}
     indexed_mol2 = set()
     for i in range(min(mol1_history.shape[0], mol2_history.shape[0])):

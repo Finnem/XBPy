@@ -1,4 +1,4 @@
-
+from rdkit.Chem import GetPeriodicTable
 def get_connected_atoms(atom, as_indices=False):
     """Return a list of atoms part of the connected component of the given atom.
 
@@ -29,4 +29,41 @@ def get_connected_atoms(atom, as_indices=False):
     else:
         return [molecule.GetAtomWithIdx(atom_idx) for atom_idx in connected_atom_ids]
 
+
+
+def get_small_molecules(structure, min_atoms = 6, max_atoms = 200):
+    """
+        By default returns all small molecules with 6 to 200 atoms.
+    """
+
+    relevant_atom_ids = set()
+    for atom in structure.GetAtoms():
+        if atom.GetAtomicNum() != 1:
+            relevant_atom_ids.add(atom.GetIdx())
+
+    small_molecule_indices = []
+    while len(relevant_atom_ids) > 0:
+        atom_idx = relevant_atom_ids.pop()
+        connected_atom_indices = get_connected_atoms(structure.GetAtomWithIdx(atom_idx), as_indices=True)
+        if (len(connected_atom_indices) >= min_atoms) and (len(connected_atom_indices) <= max_atoms):
+            small_molecule_indices.append(connected_atom_indices)
+        relevant_atom_ids.difference_update(connected_atom_indices)
     
+    return [[structure.GetAtomWithIdx(a_idx) for a_idx in (atom_indices)] for atom_indices in small_molecule_indices]
+
+def vdw_radius(atom):
+    """Return the van der Waals radius of the given atom.
+
+    Args:
+        atom (RDKit.Atom): Atom to get the van der Waals radius from. Can be a list of atoms.
+
+    Returns:
+        float: van der Waals radius of the given atom.
+
+    """
+    try:
+        atom = list(atom)
+    except TypeError:
+        atom = [atom]
+
+    return [GetPeriodicTable().GetRvdw(a.GetAtomicNum()) for a in atom]

@@ -1,7 +1,8 @@
 
 import logging
+from tqdm import tqdm
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, maximum = None, removeHs=False, sanitize=False, proximityBonding=False, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
@@ -11,8 +12,8 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
         *args: Additional arguments to pass to the RDKit reader.
         **kwargs: Additional keyword arguments to pass to the RDKit reader.
 
-    Returns:
-        list(RDKit.Mol): List of RDKit molecules.
+    Yields:
+        RDKit.Mol: RDKit molecules.
 
     """
 
@@ -25,6 +26,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
 
     molecules = []
     # Loop over all paths, seperated from tree walk to allow for error detection (emtpy paths)
+    molecule_paths = []
     for path in paths:
         remaining_paths = set([path])
         seen = set()
@@ -37,19 +39,22 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
                     if (f not in seen) and recursive:
                         remaining_paths.add(f)
                 else:
-                    used_maximum = None if maximum is None else maximum - (len(molecules) + len(path_molecules))
-                    path_molecules.extend(_read_molecules_file(f, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, maximum = used_maximum, proximityBonding=proximityBonding, *args, **kwargs))
+                    molecule_paths.append(f)
                     
             seen.add(p)
+        if len(molecule_paths) == 0:
+            logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
 
+    for path in molecule_paths:
+        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, *args, **kwargs)
         if len(path_molecules) == 0:
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
         else:
-            molecules.extend(path_molecules)
-    return molecules
+            for mol in path_molecules:
+                yield mol
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, maximum = None, proximityBonding=False, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -66,6 +71,8 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, max
 
     molecules = []
     if os.path.splitext(path)[1] == ".pdb":
+        if not "flavor" in kwargs:
+            kwargs["flavor"] = 4
         molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol2":
         molecules = [Chem.rdmolfiles.MolFromMol2File(path, *args, **kwargs)]
@@ -111,7 +118,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, max
     return molecules
 
 
-def read_molecules_xyz(path, reference_molecule, *args, **kwargs):
+def read_molecules_xyz(path, reference_molecule, infer_bonds = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -130,7 +137,11 @@ def read_molecules_xyz(path, reference_molecule, *args, **kwargs):
         xyz_molecule = Chem.rdmolfiles.MolFromXYZFile(path)
         if reference_molecule is None:
             #logging.warning("No reference molecule provided. Inferring molecule from xyz only.")
-            molecule = xyz_molecule
+            if infer_bonds:
+                molecule = Chem.MolFromPDBBlock(Chem.MolToPDBBlock(xyz_molecule), proximityBonding=True, sanitize=False, removeHs=False)
+                logging.warning("Inferring bonds from xyz file. This may lead to incorrect results.")
+            else:
+                molecule = xyz_molecule
             molecule.UpdatePropertyCache()
             Chem.rdmolops.AssignAtomChiralTagsFromStructure(molecule)
             Chem.rdmolops.AssignStereochemistry(molecule)
@@ -151,3 +162,7 @@ def read_molecules_xyz(path, reference_molecule, *args, **kwargs):
 
 
     return [molecule]
+
+
+def write_as_batches(molecules, batch_size, type = "xyz"):
+    ...
