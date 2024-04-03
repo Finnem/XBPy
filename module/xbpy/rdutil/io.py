@@ -1,8 +1,10 @@
 
 import logging
 from tqdm import tqdm
+import numpy as np
+from rdkit.Chem.rdmolops import RenumberAtoms
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=False, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=False, reset_index = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
@@ -45,12 +47,17 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
         if len(molecule_paths) == 0:
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
 
-    for path in molecule_paths:
+    for path in sorted(molecule_paths):
         path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, *args, **kwargs)
         if len(path_molecules) == 0:
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
         else:
             for mol in path_molecules:
+                if reset_index:
+                    from ..morgan import unique_index
+                    new_indices = unique_index(mol)
+                    ordering = np.argsort(new_indices)
+                    mol = RenumberAtoms(mol, [int(i) for i in ordering])
                 yield mol
 
 
@@ -81,7 +88,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     elif os.path.splitext(path)[1] == ".sdf":
         molecules = Chem.rdmolfiles.SDMolSupplier(path, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
-        molecules = read_molecules_xyz(path, reference_molecule, *args, **kwargs)
+        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, *args, **kwargs)
     else:
         raise ValueError("File format not recognized.")
 
@@ -118,7 +125,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     return molecules
 
 
-def read_molecules_xyz(path, reference_molecule, infer_bonds = False, *args, **kwargs):
+def read_molecules_xyz(path, reference_molecule, proximityBonding = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -137,14 +144,21 @@ def read_molecules_xyz(path, reference_molecule, infer_bonds = False, *args, **k
         xyz_molecule = Chem.rdmolfiles.MolFromXYZFile(path)
         if reference_molecule is None:
             #logging.warning("No reference molecule provided. Inferring molecule from xyz only.")
-            if infer_bonds:
+            if proximityBonding:
                 molecule = Chem.MolFromPDBBlock(Chem.MolToPDBBlock(xyz_molecule), proximityBonding=True, sanitize=False, removeHs=False)
                 logging.warning("Inferring bonds from xyz file. This may lead to incorrect results.")
             else:
                 molecule = xyz_molecule
-            molecule.UpdatePropertyCache()
-            Chem.rdmolops.AssignAtomChiralTagsFromStructure(molecule)
-            Chem.rdmolops.AssignStereochemistry(molecule)
+            try:
+                molecule.UpdatePropertyCache()
+                Chem.rdmolops.AssignAtomChiralTagsFromStructure(molecule)
+                Chem.rdmolops.AssignStereochemistry(molecule)
+            except Chem.AtomValenceException:
+                if not kwargs.get("sanitize", False):
+                    logging.warning("Could not infer stereochemistry from xyz file. This may be due to the molecule not being sanitized.")
+                else:
+                    raise
+
         else:
             molecule = Chem.Mol(reference_molecule)
             for prop in reference_molecule.GetPropNames():

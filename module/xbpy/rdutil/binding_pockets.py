@@ -2,10 +2,12 @@ from .select import get_small_molecules
 from .geometry import position, check_occlusion, AtomKDTree
 from scipy.spatial import cKDTree
 import numpy as np
+import logging
 from collections import defaultdict
 
+PROTEINOGENIC_AA = set(["ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL"])
 class BindingPocket():
-    def __init__(self, center, radius, atoms, protein):
+    def __init__(self, center, radius, atoms, protein, ignore_aa = True):
         self.center = center
         self.radius = radius
         self.atoms = atoms
@@ -21,6 +23,9 @@ class BindingPocket():
     
         atom_ids = set([atom.GetIdx() for atom in atoms])
         for small_molecule in small_molecules:
+            if (ignore_aa or (ignore_aa is None)) and all(atom.GetPDBResidueInfo().GetResidueName() in PROTEINOGENIC_AA for atom in small_molecule):
+                if ignore_aa is None: logging.warning("Skipping proteinogenic amino acid as small molecule. If you want to include it, please pass ignore_aa = False.")
+                continue
             positions = position(small_molecule)
             if len(small_molecule) < 6:
                 if sum([(atom.GetAtomicNum() not in [1,8]) for atom in small_molecule]) == 0:
@@ -99,10 +104,13 @@ def get_grid_neighbors(grid_idx, spacing, radius, range = 1):
     return grid_idx
 
 
-def get_binding_pockets_by_ligand(protein, margin = 4.0):
+def get_binding_pockets_by_ligand(protein, margin = 4.0, ignore_aa = None):
     small_molecules = get_small_molecules(protein)
     binding_pockets = []
     for small_molecule in small_molecules:
+        if (ignore_aa or (ignore_aa is None)) and all(atom.GetPDBResidueInfo().GetResidueName() in PROTEINOGENIC_AA for atom in small_molecule):
+            if ignore_aa is None: logging.warning("Skipping proteinogenic amino acid as small molecule. If you want to include it, please pass ignore_aa = False. To ignore it, pass ignore_aa = True.")
+            continue
         # determine center of molecule
         atom_positions = np.array([position(atom) for atom in small_molecule])
         center = np.mean(atom_positions, axis=0)
@@ -113,5 +121,5 @@ def get_binding_pockets_by_ligand(protein, margin = 4.0):
         for atom in protein.GetAtoms():
             if np.linalg.norm(position(atom) - center) < radius + margin:
                 atoms.append(atom)
-        binding_pockets.append(BindingPocket(center, radius, atoms, protein))
+        binding_pockets.append(BindingPocket(center, radius, atoms, protein, ignore_aa = ignore_aa))
     return binding_pockets

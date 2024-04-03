@@ -57,13 +57,13 @@ def align_directions(from_direction, to_direction):
     if np.allclose(from_direction, to_direction):
         return np.eye(3)
     elif np.allclose(from_direction, -to_direction):
-        return -np.eye(3)
+        rotation_axis = get_perp(from_direction)
     else:
         rotation_axis = np.cross(from_direction, to_direction)
-        rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
-        rotation_angle = np.arccos(np.dot(from_direction, to_direction))
-        rotation_matrix = R.from_rotvec(rotation_angle * rotation_axis).as_matrix()
-        return rotation_matrix
+    rotation_axis = rotation_axis / np.linalg.norm(rotation_axis)
+    rotation_angle = np.arccos(np.dot(from_direction, to_direction))
+    rotation_matrix = R.from_rotvec(rotation_angle * rotation_axis).as_matrix()
+    return rotation_matrix
 
 def align_to_axes(from_origin, from_axis, from_plane, target_origin = [0, 0, 0], target_axis = "x", target_plane = "z"):
     """Find the rotation and t*ranslation that aligns the given axis and plane to the target axis and plane.
@@ -83,6 +83,7 @@ def align_to_axes(from_origin, from_axis, from_plane, target_origin = [0, 0, 0],
     from_axis_direction = (from_axis - np.array(from_origin)); from_axis_direction /= np.linalg.norm(from_axis_direction)
     from_plane_direction = (from_plane - np.array(from_origin)); from_plane_direction /= np.linalg.norm(from_plane_direction)
     
+
     if target_axis in ["x", "y", "z"]:
         actual_target_axis = np.array([0, 0, 0])
         actual_target_axis["xyz".index(target_axis)] = 1
@@ -96,10 +97,15 @@ def align_to_axes(from_origin, from_axis, from_plane, target_origin = [0, 0, 0],
         target_plane = actual_target_plane
     else:
         target_plane = np.array(target_plane); target_plane = target_plane / np.linalg.norm(target_plane)
-    rotation = align_directions(from_axis_direction, target_axis)
-    from_plane_direction = rotation @ from_plane_direction
+    target_plane = target_plane - np.dot(target_plane, target_axis) * target_axis
+    first_rotation = align_directions(from_axis_direction, target_axis)
+    from_plane_direction = first_rotation @ from_plane_direction
     target_direction = from_plane_direction - (from_plane_direction @ target_axis * target_axis)
-    rotation = align_directions(target_direction, target_plane) @ rotation
+    if np.isclose(target_direction @ target_plane, -np.linalg.norm(target_direction)):
+        second_rotation = R.from_rotvec(np.pi * target_axis).as_matrix()
+    else:
+        second_rotation = align_directions(target_direction, target_plane)
+    rotation = second_rotation @ first_rotation
     translation = np.array(target_origin) - rotation @ np.array(from_origin)
 
     return rotation, translation

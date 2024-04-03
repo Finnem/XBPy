@@ -20,6 +20,9 @@ class AtomKDTree():
                 indices[i].update(result)
         return indices
 
+def positions(*args, **kwargs):
+    return position(*args, **kwargs)
+
 def position(atom, conformer = 0):
     """Return the position of the given atom.
 
@@ -50,6 +53,9 @@ def position(atom, conformer = 0):
             return molecular_positions[indices]
         else:
            return np.array([conformer.GetAtomPosition(a.GetIdx()) for a in atom])
+    if isinstance(atom, Chem.rdchem.Mol):
+        conformer = atom.GetConformer(conformer)
+        return np.array(conformer.GetPositions())
     else:
         if not (type(conformer) == int):
             conformer = conformer

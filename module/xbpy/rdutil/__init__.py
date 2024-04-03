@@ -1,6 +1,7 @@
 from .io import read_molecules
 from .io import write_as_batches
 from .geometry import position
+from .geometry import positions
 from .geometry import transform
 from .geometry import check_occlusion
 from .select import get_connected_atoms

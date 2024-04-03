@@ -5,5 +5,5 @@ setup(name='xbpy',
         url='',
         author='Finn Mier',
         license='MIT',
-        packages=['xbpy'],
+        packages=['xbpy.rdutil', 'xbpy.dispatch', 'xbpy.math', 'xbpy.morgan', 'xbpy'],
         zip_safe=False)

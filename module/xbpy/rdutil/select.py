@@ -1,4 +1,5 @@
 from rdkit.Chem import GetPeriodicTable
+from rdkit.Chem.rdchem import Atom
 def get_connected_atoms(atom, as_indices=False):
     """Return a list of atoms part of the connected component of the given atom.
 
@@ -66,4 +67,6 @@ def vdw_radius(atom):
     except TypeError:
         atom = [atom]
 
-    return [GetPeriodicTable().GetRvdw(a.GetAtomicNum()) for a in atom]
+    atomic_number = [a.GetAtomicNum() if type(a) == Atom else GetPeriodicTable().GetAtomicNumber(a) for a in atom]
+
+    return [GetPeriodicTable().GetRvdw(a) for a in atom]
