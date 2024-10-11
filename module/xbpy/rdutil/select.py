@@ -1,5 +1,53 @@
 from rdkit.Chem import GetPeriodicTable
 from rdkit.Chem.rdchem import Atom
+from rdkit import Chem
+
+
+def bond_independent_substructure_matches(mol, query):
+    mol_copy = Chem.Mol(mol)
+    query_copy = Chem.Mol(query)
+    for bond in mol_copy.GetBonds():
+        bond.SetBondType(Chem.BondType.UNSPECIFIED)
+    for bond in query_copy.GetBonds():
+        bond.SetBondType(Chem.BondType.UNSPECIFIED)
+    return mol_copy.GetSubstructMatches(query_copy)
+
+def select_atom(possible_atoms, neighborhood = None, element = None, return_first = True):
+    """
+    Returns a atom (if return first) or all atoms that have the given amount of neighbors.
+
+    Args:
+        possible_atoms (RDKit.Mol or iterable of atoms): List of Atoms or Molecule to get the atoms from.
+        neighborhood (dict): Dictionary mapping atom symbols to their number of occurences that is beeing sought.
+        return_first (bool): Defaults to True. If True, return the first atom found. If False, return all atoms found.
+
+    Returns:
+        list(RDKit.Atom) or RDKit.Atom: List of atoms that have the given amount of neighbors.
+
+    """
+    atoms = []
+    if neighborhood is None:
+        neighborhood = {}
+    if hasattr(possible_atoms, "GetAtoms"):
+        possible_atoms = possible_atoms.GetAtoms()
+    for atom in possible_atoms:
+        invalid = False
+        if not element is None:
+            if atom.GetSymbol() != element:
+                continue
+        for symbol, count in neighborhood.items():
+            for n in atom.GetNeighbors():
+                if n.GetSymbol() == symbol:
+                    count -= 1
+            if count != 0:
+                invalid = True
+                break
+        if not invalid:
+            if return_first:
+                return atom
+            atoms.append(atom) 
+    return atoms
+
 def get_connected_atoms(atom, as_indices=False):
     """Return a list of atoms part of the connected component of the given atom.
 

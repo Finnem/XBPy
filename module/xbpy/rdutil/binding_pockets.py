@@ -51,7 +51,7 @@ class BindingPocket():
     
 
 
-    def get_accessible_points(self, spacing, around = 1, neighbor_count = 4):
+    def get_accessible_points(self, spacing, around = 1, neighbor_count = 4, distance_threshold = 0.5):
         """Returns points that are accessible in the binding pocket.
         
         Args:
@@ -65,7 +65,7 @@ class BindingPocket():
         grid = self.get_grid(spacing)
 
         kdtree = AtomKDTree(self.pocket_atoms)
-        collision_indices = kdtree.query_ball_point(grid, 0.5)
+        collision_indices = kdtree.query_ball_point(grid, distance_threshold)
         unobstructed_indices = [i for i, indices in enumerate(collision_indices) if len(indices) == 0]
 
         # check if they lie within the sphere

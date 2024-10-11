@@ -3,6 +3,7 @@ from rdkit import Chem
 import numpy as np
 import logging
 from scipy.spatial import cKDTree
+from scipy.sparse import csr_matrix
 
 class AtomKDTree():
     def __init__(self, atoms):
@@ -164,4 +165,6 @@ def check_occlusion(from_atoms, to_atoms, potential_occluders, return_occluders 
     else:
         # if van der waals radii intersect, we assume no occlusion can happen
         return occluded.any(axis = -1) & (from_projection_caps < to_projection_caps)
+
+
 

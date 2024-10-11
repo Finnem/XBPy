@@ -73,7 +73,7 @@ def align_to_axes(from_origin, from_axis, from_plane, target_origin = [0, 0, 0],
         from_axis (np.ndarray): 3D vector. Point which should be translated to the axis.
         from_plane (np.ndarray): 3D vector. Point which should be translated to the plane.
         target_origin (np.ndarray): 3D vector. Target origin.
-        target_axis (np.ndarray): 3D vector. Target axis.
+        target_axis (np.ndarray): 3D vector. Target axis. Should be the vector that points into the direction of the target axis.
         target_plane (np.ndarray): 3D vector. Axis which together with the target axis spans the target plane.
 
     Returns:
@@ -133,6 +133,27 @@ def get_perp(v):
     return cross / np.linalg.norm(cross)
 
 
+def transform(points, rotation, translation):
+    """Apply a rotation and translation to the given points.
+    
+    Args:
+        points (np.ndarray): Nx3 matrix of N 3D points.
+        rotation (np.ndarray): 3x3 rotation matrix.
+        translation (np.ndarray): 3D translation vector.
+    
+    """
+    return (rotation @ points.T + translation[:, None]).T
+
+def apply_transform(points, rotation, translation):
+    """ Compatibility function for transform.
+
+    Args:
+        points (np.ndarray): Nx3 matrix of N 3D points.
+        rotation (np.ndarray): 3x3 rotation matrix.
+        translation (np.ndarray): 3D translation vector.
+    
+    """
+    return transform(points, rotation, translation)
 
 def rigid_transform(A, B, sanity_check_tolerance=None):
     """Find the rigid transformation that aligns A to B.
@@ -197,7 +218,7 @@ def rigid_transform(A, B, sanity_check_tolerance=None):
 
     return R, t.flatten()
 
-def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_radius, point_distance):
+def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_radius, point_distance, smooth_distance = 3):
     """ Sample the solvent accessible surface of the given atoms. Not intended for use with large molecules.
     
     Args:
@@ -205,6 +226,7 @@ def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_rad
         atom_radii (np.ndarray): N vector of atom radii.
         distance_radius (float): Radius of the sphere around each atom.
         point_distance (float): Distance between the points on the sphere.
+        smooth_distance (float): Distance for atoms to be considered for smoothing. If 0 no smoothing is applied.
 
     Returns:
         np.ndarray: Nx3 matrix of points on the solvent excluded surface.
@@ -231,19 +253,24 @@ def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_rad
         directions.append(direction)
     points = np.concatenate(points, axis=0)
     single_directions = np.concatenate(directions, axis=0)
-    kdtree = cKDTree(points)
+    kdtree = cKDTree(atom_coordinates)
 
     # smooth directions locally
-    neighbors = kdtree.query_ball_point(points, 10 * point_distance)
-    print(neighbors)
-    directions = []
-    for i, neighbor in enumerate(neighbors):
-        distances = np.linalg.norm(points[i] - points[neighbor], axis=1)
-        weights = np.exp(-distances / point_distance) + 1
-        weights /= np.sum(weights)
-        directions.append(np.sum(weights[:, None] * single_directions[neighbor], axis=0))
-    directions = np.array(directions)
-    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    if smooth_distance != 0:
+        neighbors = kdtree.query_ball_point(points, smooth_distance)
+        #print(neighbors)
+        directions = []
+        for i, neighbor in enumerate(neighbors):
+            differences = atom_coordinates[neighbor] - points[i]
+            distances = np.linalg.norm(differences, axis=1)
+            weights = np.exp(-distances / smooth_distance) + 1
+            weights /= np.sum(weights)
+            neighbor_directions = differences; neighbor_directions /= np.linalg.norm(neighbor_directions, axis=1)[:, None]
+            directions.append(np.sum(weights[:, None] * neighbor_directions, axis=0))
+        directions = np.array(directions)
+        directions /= np.linalg.norm(directions, axis=1)[:, None]
+    else:
+        directions = single_directions
 
     return points, directions#, point_colors
 
