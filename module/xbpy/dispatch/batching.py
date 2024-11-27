@@ -22,6 +22,7 @@ def distribute_to_batches(molecules, batch_size, out_folder, format, similarity_
         list(str): List of paths to the written batches.
 
     """
+    raise DeprecationWarning("This function is deprecated. Please use the function in the rdutil.io.write_molecules function.")
     if suffix is None:
         suffix = ""
     if similarity_threshold is None:

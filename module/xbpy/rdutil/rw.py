@@ -1,7 +1,11 @@
 import numpy as np
 from rdkit.Chem import AllChem
+import logging
 from rdkit.Geometry import Point3D
 from rdkit import Chem
+from ..math.geometry import calculate_angle
+from .geometry import position
+from itertools import combinations
 def remove_atoms(mol, atoms):
     """Remove the given atoms from the molecule.
     
@@ -130,7 +134,7 @@ def copy_props(mol_from, mol_to, replace_dict = None):
 
 
 
-def build_molecule(positions, elements, bond_indices, bond_orders, formal_charges=None, hybridizations=None):
+def build_molecule(positions, elements, bond_indices, bond_orders, formal_charges=None, hybridizations=None, sanitize=True):
     """
     Constructs an RDKit molecule from atom positions, element symbols, bond indices, bond orders,
     and optionally formal charges and hybridization states.
@@ -142,6 +146,7 @@ def build_molecule(positions, elements, bond_indices, bond_orders, formal_charge
         bond_orders (list): List of bond orders as strings (e.g., "SINGLE", "DOUBLE", "TRIPLE", "AROMATIC", "ONEANDAHALF").
         formal_charges (list, optional): List of formal charges corresponding to each atom. If not provided, formal charges default to 0 for all atoms.
         hybridizations (list, optional): List of hybridization states for each atom as strings (e.g., "SP", "SP2", "SP3"). If not provided, hybridization defaults to unspecified for all atoms.
+        sanitize (bool, optional): Whether to sanitize the molecule after construction. Defaults to True.
 
     Returns:
         rdkit.Chem.rdchem.Mol: An RDKit molecule object with the specified atoms, bonds, and coordinates.
@@ -217,14 +222,49 @@ def build_molecule(positions, elements, bond_indices, bond_orders, formal_charge
     
     # Finalize the molecule
     mol.UpdatePropertyCache(strict=False)
-    Chem.SanitizeMol(mol)
+    if sanitize:
+        Chem.SanitizeMol(mol)
     
     return mol
 
 
+def kekulize_mol(mol):
+    from rdkit.Chem import rdmolops
+    from rdkit.Chem import rdchem
+    rdmolops.FastFindRings(mol)
 
+    mol = mol.GetMol()
+    # remove implicit hydrogens
+    ring_info = mol.GetRingInfo()
+    atom_rings = ring_info.AtomRings()
+    atom_to_ring = {atom_idx : set() for atom_idx in range(mol.GetNumAtoms())}
+    for ring in atom_rings:
+        for atom_idx in ring:
+            atom_to_ring[atom_idx].add(ring)
+    possibly_aromatic = set()
+    for atom in mol.GetAtoms():
+        if atom.GetNumImplicitHs() > 0:
+            possibly_aromatic.add(atom.GetIdx())
+        atom.SetNoImplicit(True)  # Disable automatic calculation of implicit hydrogens
+    for bond in mol.GetBonds():
+        if (bond.GetBondType() == rdchem.BondType.SINGLE) and \
+        ((bond.GetBeginAtomIdx() in possibly_aromatic) or (bond.GetEndAtomIdx() in possibly_aromatic)) and \
+        (atom_to_ring[bond.GetBeginAtomIdx()] & atom_to_ring[bond.GetEndAtomIdx()]):
+            bond.SetBondType(rdchem.BondType.AROMATIC)
 
-def proximity_bond(mol, allow_aromatic = False):
+    Chem.SanitizeMol(mol)
+    Chem.Kekulize(mol, clearAromaticFlags=True)
+
+    # if kekulize didnt catch the ring, its not aromatic
+    for bond in mol.GetBonds():
+        if bond.GetBondType() == rdchem.BondType.AROMATIC:
+            if not bond.GetIsAromatic():
+                bond.SetBondType(rdchem.BondType.SINGLE)
+
+    mol.UpdatePropertyCache(strict=True)
+    return mol
+
+def proximity_bond(mol, kekulize = True, handle_valency = "auto", allow_hydrogen_gas = False):
     """
     Infer bonds from the proximity of atoms. This is done by checking the distance of each atom to each other atom.
     If the distance is smaller than the sum of the van-der-waals radii, a bond is inferred.
@@ -233,7 +273,9 @@ def proximity_bond(mol, allow_aromatic = False):
 
     Args:
         mol (RDKit.Mol): Molecule to infer bonds for.
-        allow_aromatic (bool): Defaults to False. If True, allow one-and-a-half bonds to be inferred.
+        kekulize (bool): Defaults to True. If True, molecule will be kekulized after adding bonds.
+        handle_valency (str): Defaults to "auto". If "auto", valency violations will be resolved by removing the most unlikely bond. If "ignore", valency violations will be ignored. If "raise", valency violations will raise an error.
+        allow_hydrogen_gas (bool): Defaults to False. If True, hydrogen gas will be allowed. This means that hydrogen atoms will not be considered to have valency violations.
 
     Returns:
         RDKit.Mol: Molecule with inferred bonds.
@@ -242,7 +284,7 @@ def proximity_bond(mol, allow_aromatic = False):
     from rdkit.Chem import rdchem
     from rdkit.Chem import rdMolTransforms
     from rdkit.Chem import rdmolops
-    from .util import bond_lengths
+    from .util import bond_lengths, ideal_bond_lengths
     from .geometry import position
     from scipy.spatial import cKDTree
 
@@ -264,6 +306,9 @@ def proximity_bond(mol, allow_aromatic = False):
     mol = Chem.RWMol(mol)
     # create a bond for each pair of close atoms
     for idx, (i, j) in enumerate(close_atoms):
+        if not allow_hydrogen_gas:
+            if (elements[i] == "H") and (elements[j] == "H"):
+                continue
         dist = d_matrix.data[cond][idx]
         if dist < bond_distances[cond][idx][3]:
             if mol.GetBondBetweenAtoms(int(i), int(j)) is None:
@@ -276,7 +321,7 @@ def proximity_bond(mol, allow_aromatic = False):
             else:
                 mol.GetBondBetweenAtoms(int(i), int(j)).SetBondType(rdchem.BondType.DOUBLE)
         elif dist < bond_distances[cond][idx][1]:
-            bond_order = rdchem.BondType.SINGLE
+            bond_order = rdchem.BondType.SINGLE#rdchem.BondType.ONEANDAHALF
             if mol.GetBondBetweenAtoms(int(i), int(j)) is None:
                 mol.AddBond(int(i), int(j), bond_order)
             else:
@@ -287,39 +332,141 @@ def proximity_bond(mol, allow_aromatic = False):
             else:
                 mol.GetBondBetweenAtoms(int(i), int(j)).SetBondType(rdchem.BondType.SINGLE)
 
+    # check for valency violations
+            
+    if any([atom.HasValenceViolation() for atom in mol.GetAtoms()]):
+            if handle_valency == "auto":
+                mol = correct_valence(mol)
+    if any([atom.HasValenceViolation() for atom in mol.GetAtoms()]):
+        if handle_valency == "ignore":
+            return mol
+        else:
+            if handle_valency == "auto":
+                logging.warning("Valency violation detected. Removing most unlikely bonds did not resolve the issue.")
+            raise ValueError("Valency violation detected.")
+    mol.UpdatePropertyCache(strict=False)
 
     # find all rings
-    rdmolops.FastFindRings(mol)
+    return kekulize_mol(mol)
 
-    mol = mol.GetMol()
-    if allow_aromatic:
-        # remove implicit hydrogens
-        ring_info = mol.GetRingInfo()
-        atom_rings = ring_info.AtomRings()
-        atom_to_ring = {atom_idx : set() for atom_idx in range(mol.GetNumAtoms())}
-        for ring in atom_rings:
-            for atom_idx in ring:
-                atom_to_ring[atom_idx].add(ring)
-        possibly_aromatic = set()
-        for atom in mol.GetAtoms():
-            if atom.GetNumImplicitHs() > 0:
-                possibly_aromatic.add(atom.GetIdx())
-            atom.SetNoImplicit(True)  # Disable automatic calculation of implicit hydrogens
-        for bond in mol.GetBonds():
-            if (bond.GetBondType() == rdchem.BondType.SINGLE) and \
-            ((bond.GetBeginAtomIdx() in possibly_aromatic) or (bond.GetEndAtomIdx() in possibly_aromatic)) and \
-            (atom_to_ring[bond.GetBeginAtomIdx()] & atom_to_ring[bond.GetEndAtomIdx()]):
-                bond.SetBondType(rdchem.BondType.AROMATIC)
+def correct_valence(mol):
+    """
+    Corrects valency violations in the molecule by removing bonds. Does not add bonds. 
+    This is mostly useful after adding bonds by proximity, which tends to overestimates bonding distances.
 
-        Chem.SanitizeMol(mol)
-        Chem.Kekulize(mol, clearAromaticFlags=True)
+    Args:
+        mol (RDKit.Mol): Molecule to correct valency violations for.
 
-        # if kekulize didnt catch the ring, its not aromatic
-        for bond in mol.GetBonds():
-            if bond.GetBondType() == rdchem.BondType.AROMATIC:
-                if not bond.GetIsAromatic():
-                    bond.SetBondType(rdchem.BondType.SINGLE)
+    Returns:
+        RDKit.Mol: Molecule with valency violations corrected.
 
+    """
+    # initially we want to determine states for each atom
+    from .util import  possible_geometries, ideal_bond_lengths
+    
+    # prefer to start at atoms that have  the strongest violations
+    def get_putative_problem_atoms(atoms, blacklist = []):
+        putative_problem_atoms = [a for a in atoms if neighbor_violation(a)]
+        if len(putative_problem_atoms) == 0:
+            putative_problem_atoms = [a for a in atoms if geometry_violation(a)]
+        if len(putative_problem_atoms) == 0:
+            putative_problem_atoms = [a for a in atoms if valency_violation(a)]
+        if len(putative_problem_atoms) == 0:
+            mol.UpdatePropertyCache(strict=False)
+            putative_problem_atoms = [a for a in atoms if a.HasValenceViolation()]
+        return putative_problem_atoms
 
+    putative_problem_atoms = get_putative_problem_atoms(mol.GetAtoms())
+    while(len(putative_problem_atoms) > 0):
+        # pick an atom from the list
+        atom = putative_problem_atoms[0]
+        atom_position = position(atom)
+        all_neighbors = np.array(atom.GetNeighbors())
+        problem_neighbors = get_putative_problem_atoms(atom.GetNeighbors())
+        if len(problem_neighbors) == 0:
+            # if no neighbors have any problems, suspect them all!
+            problem_neighbors = atom.GetNeighbors()
+        
+        # now we check for each neighbor count and geometry which would suit us best
+        geometries = possible_geometries[atom.GetSymbol()]
+        neighbor_positions = position(atom.GetNeighbors())
+        problem_neighbor_indices = [atom.GetIdx() for atom in problem_neighbors]
+        problem_neighbor_indices = [idx for idx, neighbor in enumerate(atom.GetNeighbors()) if neighbor.GetIdx() in problem_neighbor_indices]
+        total_neighbor_count = len(neighbor_positions)
+        scored_combinations = []
+        for possible_neighbor_count, geometry in geometries.items():
+            for invalid_neighbor_combination in combinations(problem_neighbor_indices, total_neighbor_count - possible_neighbor_count):
+                valid_neighbor_mask = np.ones(total_neighbor_count, dtype = bool)
+                valid_neighbor_mask[list(invalid_neighbor_combination)] = False
+                score = 0
+                # next we check for each bond order if it fits the geometry
+                for neighbor in all_neighbors[valid_neighbor_mask]:
+                    if not mol.GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx()).GetBondTypeAsDouble() in geometry["bond_orders"]:
+                        score = -np.inf
+                        break
+                
+                # if some bond doesnt fit, we assume the geometry to be invalid
+                if score != -np.inf:
+                    # otherwise we check if the geometry is valid
+                    # for this we compute the average angle deviation
+                    angle_deviations = []
+                    for neighbor_combination in combinations(neighbor_positions[valid_neighbor_mask], 2):
+                        angle = calculate_angle(neighbor_combination[0], atom_position, neighbor_combination[1])
+                        angle_deviations.append(np.min([abs(angle - required_angle) for required_angle in geometry["angles"]]))
+                    ideal_distance_deviations = []
+                    if len(angle_deviations) > 0:
+                        # and the distance deviation for the invalid neighbors
+                        for neighbor in all_neighbors[~valid_neighbor_mask]:
+                            ideal_distance_deviations.append(np.abs(np.linalg.norm(position(neighbor) - atom_position) - ideal_bond_lengths[atom.GetSymbol()][neighbor.GetSymbol()]))
+                        score = 1/np.mean(angle_deviations) + np.mean(ideal_distance_deviations)
+                    else:
+                        score = -np.inf
+                scored_combinations.append((score, invalid_neighbor_combination))
+        
+        # now we sort the combinations by score and remove the worst fitting bonds
+        scored_combinations.sort(reverse=True)
+        best_combination = scored_combinations[0]
+        for neighbor_idx in best_combination[1]:
+            mol.RemoveBond(atom.GetIdx(), all_neighbors[neighbor_idx].GetIdx())
+            logging.warning(f"Valency Violation detected. Removing bond between {atom.GetSymbol()}:{atom.GetIdx()} and {all_neighbors[neighbor_idx].GetSymbol()}:{all_neighbors[neighbor_idx].GetIdx()}.")
+        
+        # update the list of putative problem atoms
+        putative_problem_atoms = get_putative_problem_atoms(mol.GetAtoms())
     return mol
 
+        
+def neighbor_violation(atom):
+    from .util import possible_geometries
+    neighbors = atom.GetNeighbors()
+    element = atom.GetSymbol()
+    if not len(neighbors) in possible_geometries[element]:
+        return True
+
+def geometry_violation(atom, tolerance = 20):
+    from .util import possible_geometries
+    # here we assume no neighbor violation
+    neighbors = atom.GetNeighbors()
+    neighbor_positions = position(neighbors)
+    atom_position = position(atom)
+    element = atom.GetSymbol()
+    required_angles = possible_geometries[element][len(neighbors)]["angles"]
+    if len(required_angles) == 0:
+        return False
+    else:
+        for neighbor_combination in combinations(neighbor_positions, 2):
+            angle = calculate_angle(neighbor_combination[0], atom_position, neighbor_combination[1])
+            if not any([abs(angle - required_angle) < tolerance for required_angle in required_angles]):
+                return True
+        return False
+
+def valency_violation(atom):
+    from .util import possible_geometries
+    # here we assume no geometry violation
+    element = atom.GetSymbol()
+    neighbors = atom.GetNeighbors()
+    allowed_bond_orders = possible_geometries[element][len(neighbors)]["bond_orders"]
+    for neighbor in neighbors:
+        bond_order = atom.GetOwningMol().GetBondBetweenAtoms(atom.GetIdx(), neighbor.GetIdx()).GetBondTypeAsDouble()
+        if not bond_order in allowed_bond_orders:
+            return True
+    return False

@@ -9,7 +9,7 @@ import logging
 from ..rdutil import position
 
 def unique_index(mol):
-    connected_components = _connected_components(mol)
+    connected_components, component_distances = _connected_components(mol, return_min_distance=True)
 
 
     original_scores = []
@@ -23,7 +23,10 @@ def unique_index(mol):
 
     # sort connected components based on scores. For some reason, lexsort sorts from last to first
     max_len = max([len(s) for s in original_scores])
-    padded_scores = np.array([np.pad(s, (0, max_len - len(s)), mode="constant", constant_values=0) for s in original_scores])
+    padded_scores = np.array([sorted(np.pad(s, (0, max_len - len(s)), mode="constant", constant_values=0)) for s in original_scores])
+
+    # append distances as first column
+    padded_scores = np.concatenate([np.array(component_distances).reshape(-1, 1), padded_scores], axis=1)
     component_order = np.lexsort(np.array([list(reversed(s)) for s in padded_scores]).T)
 
     new_index = np.zeros(mol.GetNumAtoms(), dtype=int)
@@ -34,22 +37,30 @@ def unique_index(mol):
         cur_index_offset += len(connected_components[i])    
     return new_index
 
-def _connected_components(mol):
+def _connected_components(mol, return_min_distance = False):
     considered_indices = set(range(mol.GetNumAtoms()))
     components = []
+    distances = []
     while considered_indices:
         component = set()
         queue = [considered_indices.pop()]
+        min_distance = np.linalg.norm(position(mol.GetAtomWithIdx(queue[0])))
         while queue:
             index = queue.pop()
             component.add(index)
+            cur_distance = np.linalg.norm(position(mol.GetAtomWithIdx(index)))
+            if cur_distance < min_distance:
+                min_distance = cur_distance
             for neighbor in mol.GetAtomWithIdx(index).GetNeighbors():
                 neighbor_index = neighbor.GetIdx()
                 if neighbor_index in considered_indices:
                     queue.append(neighbor_index)
                     considered_indices.remove(neighbor_index)
+        distances.append(min_distance) 
         components.append(list(component))
-    return components
+
+    # reorder components based on distance to origin
+    return components, distances
 
 def morgan_prop(mol, indices = None, return_history = False, just_topology = False):
     if indices is None:
@@ -84,7 +95,22 @@ def get_equivalent_atoms(mol, indices):
         result.append(np.where(order == val)[0])
     return result
 
-def resolve_ambiguity(atoms, order, ambiguous_indices = None):
+def resolve_ambiguity(atoms, order):
+
+    # resolve ambiguities based on spatial distance to heaviest atoms
+    unique_vals, unique_counts = np.unique(order, return_counts=True)
+    for val in unique_vals[unique_counts > 1]:
+        next_indices = np.where(order == val)[0]
+        # just take distance to origin as reference
+        positions = position([atoms[int(i)] for i in next_indices])
+        distances = np.linalg.norm(np.array(positions), axis=1)
+        results = rankdata(-distances, method="min") - 1
+        order[next_indices] += results
+
+    return order
+
+#legacy function
+def _legacy_resolve_ambiguity(atoms, order, ambiguous_indices = None, legacy = False):
 
     # resolve ambiguities based on spatial distance to heaviest atoms
     sorted_indices = np.argsort(order)
@@ -121,8 +147,15 @@ def resolve_ambiguity(atoms, order, ambiguous_indices = None):
         unique_vals, unique_counts = np.unique(order, return_counts=True)
         for val in unique_vals[unique_counts > 1]:
             next_indices = np.where(order == val)[0]
-            order[next_indices] += _resolve_ambiguity(next_indices, len(sorted_indices) - 1)
+            if legacy:
+                order[next_indices] += _resolve_ambiguity(next_indices, len(sorted_indices) - 1)
+            else:
+                # just take distance to origin as reference
+                positions = position([atoms[int(i)] for i in next_indices])
+                distances = np.linalg.norm(np.array(positions), axis=1)
+                results = rankdata(-distances, method="min") - 1
             sorted_indices = np.argsort(order)
+            #return sorted_indices
     
     else:
         return _resolve_ambiguity(ambiguous_indices, len(sorted_indices) - 1)

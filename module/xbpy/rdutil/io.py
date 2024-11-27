@@ -1,11 +1,15 @@
 
+
 import logging
 from tqdm import tqdm
 import numpy as np
 import re
+import gzip
 from rdkit import Chem
 from rdkit.Chem.rdmolops import RenumberAtoms
 from .util import jump_to_nth_last_line
+from collections import defaultdict
+from pathlib import Path
 
 
 def determine_molecule_paths(paths, recursive = True):
@@ -25,7 +29,6 @@ def determine_molecule_paths(paths, recursive = True):
                         remaining_paths.add(f)
                 else:
                     molecule_paths.append(f)
-                    
             seen.add(p)
         if len(molecule_paths) == 0:
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
@@ -58,16 +61,13 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
     molecule_paths = determine_molecule_paths(paths, recursive=recursive)
     for path in sorted(molecule_paths):
         path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, *args, **kwargs)
-        if len(path_molecules) == 0:
-            logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
-        else:
-            for mol in path_molecules:
-                if reset_index:
-                    from ..morgan import unique_index
-                    new_indices = unique_index(mol)
-                    ordering = np.argsort(new_indices)
-                    mol = RenumberAtoms(mol, [int(i) for i in ordering])
-                yield mol
+        for mol in path_molecules:
+            if reset_index:
+                from ..morgan import unique_index
+                new_indices = unique_index(mol)
+                ordering = np.argsort(new_indices)
+                mol = RenumberAtoms(mol, [int(i) for i in ordering])
+            yield mol
 
 
 def get_num_molecules(paths, recursive = True, *args, **kwargs):
@@ -144,6 +144,10 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
         molecules = [Chem.rdmolfiles.MolFromMolFile(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".sdf":
         molecules = Chem.rdmolfiles.SDMolSupplier(path, *args, **kwargs)
+    elif os.path.splitext(path)[1] == ".mae":
+        molecules = Chem.rdmolfiles.MaeMolSupplier(path, *args, **kwargs)
+    elif os.path.splitext(path)[1] == ".maegz":
+        molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
         molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, *args, **kwargs)
     else:
@@ -353,7 +357,125 @@ def read_coord_file(path, reference_molecule = None, proximityBonding = True, to
     return [mol]
 
 
+def write_molecules(mols, path, file_type = None, batch_size = False, *args, **kwargs):
+    """ 
+        Write molecules to a file or directory. Works for a single molecule or a list of molecules. 
+        The file type can be inferred from the ending of the path or be explicitly given, in which case the ending will be overwritten.
+        If a single molecule is given, the molecule will be saved to the given path.
+        If multiple molecules are given, a directory with the given path will be created and each molecules will be saved under the path's stem and the given ending.
+        If no ending is given, the molecules index will be appended. and the ending will be appended to the file name.
+        ending can be of type str or a function that takes the molecule and the index as arguments and returns a string.
 
+        If a batch size is given, the molecules will be written in subdirectories named batch_{index} of the given size.
+
+    Args:
+        mols (list(RDKit.Mol)): List of RDKit molecules.
+        path (str): Path to a file or directory.
+        file_type (str): Defaults to None. File type to write the molecules in. If None, the file type is inferred from the path.
+        ending (str or function(mol, index)): Defaults to None. Ending to append to the file name. If None, the ending is inferred from the molecule.
+        batch_size (int): Defaults to False. If not False, write the molecules in batches of the given size.
+
+    """
+
+    import os
+    from pathlib import Path
+    if issubclass(type(mols), Chem.Mol):
+        mols = [mols]
+        
+    base_paths_batch_count = defaultdict(int)
+    sdf_handles = {}
+    try:
+        for i, mol in enumerate(mols):
+            # determine current path
+            if type(path) == list:
+                cur_path = path[i]
+            else:
+                cur_path = path
+
+            # check if we should enfore file separation => if multiple files are given and the file type is not sdf
+            require_separation = (len(mols) > 1) and not ((file_type == "sdf") or ((type(cur_path) == str) and (cur_path.endswith(".sdf"))))
+            cur_path = _resolve_path(mol, i, cur_path, require_separation = require_separation)
+
+            # determine file type
+            if file_type is None:
+                try:
+                    file_type = cur_path.suffix[1:]
+                except AttributeError:
+                    logging.warning("No file type specified and no file extension found. Defaulting to xyz.")
+                    file_type = "xyz"
+            if not cur_path.suffix:
+                cur_path = cur_path.with_suffix(f".{file_type}")
+
+            # determine current batch for parent directory
+            if batch_size:
+                base_paths_batch_count[cur_path.parent] += 1
+                cur_batch = base_paths_batch_count[cur_path.parent] // batch_size
+                # create batch directory if necessary and inject it into the path
+                cur_path = cur_path.parent / f"batch_{cur_batch}{cur_path.name}" / cur_path.name
+                os.makedirs(cur_path.parent, exist_ok = True)
+
+            cur_path = str(cur_path)
+            if file_type == "xyz":
+                Chem.MolToXYZFile(mol, cur_path)
+            elif file_type == "mol":
+                Chem.MolToMolFile(mol, cur_path)
+            elif file_type == "sdf":
+                #cur_handle = sdf_handles.get(cur_path, Chem.SDWriter(cur_path))
+                with open(cur_path, "a") as f:
+                    # TODO not the best way to handle this, however keeping SDWriter open seems to result in null-bytes
+                    cur_handle = Chem.SDWriter(f)
+                    cur_handle.write(mol)
+                    cur_handle.flush()
+                    cur_handle.close()
+                sdf_handles[cur_path] = cur_handle
+            elif file_type == "pdb":
+                Chem.MolToPDBFile(mol, cur_path)
+            # rest could be better implemented by importing pymol and using its functions
+            # need to figure out how to pass molecules from rdkit to pymol => maybe new module?
+            elif file_type == "mae":
+                raise NotImplementedError("Writing to mae files is not yet implemented.")
+            elif file_type == "maegz":
+                raise NotImplementedError("Writing to maegz files is not yet implemented.")
+            elif file_type == "mol2":
+                raise NotImplementedError("Writing to mol2 files is not yet implemented.")
+    finally:
+        for handle in sdf_handles.values():
+            ...#handle.close()
+
+def _resolve_path(mol, index, cur_path, require_separation = False):
+    """Resolve the path for a given molecule and index.
+
+    Args:
+        mol (RDKit.Mol): RDKit molecule.
+        index (int): Index of the molecule.
+        cur_path (str, Path or function): Path to resolve.
+
+    Returns:
+        Resolved Path.
+    """
+    # 1 path is just a string
+    if type(cur_path) == str:
+        # 1.1 potentially a format string
+        formatted_path = cur_path.format(i=index, mol=mol, **mol.GetPropsAsDict())
+
+        # 1.2 check if path was actually formatted
+        if require_separation:
+            if formatted_path != cur_path:
+                cur_path = Path(formatted_path)
+            else:
+                # 1.3 otherwise we append the index
+                cur_path = Path(cur_path)
+                # inject index into path
+                cur_path = cur_path.parent / f"{cur_path.stem}_{index}{cur_path.suffix}"
+        else:
+            cur_path = Path(formatted_path)
+    # 2 path is a Path
+    elif type(cur_path) == Path:
+        cur_path = cur_path
+    # 3 path is a function # here we cant really check for separation
+    elif callable(cur_path):
+        cur_path = Path(cur_path(mol, index))
+    return cur_path
 
 
 def write_as_batches(molecules, batch_size, type = "xyz"):

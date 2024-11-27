@@ -309,3 +309,15 @@ def sample_heart(direction, radius, max_angle, ideal_spacing):
     return points
 
 
+
+def calculate_angle(v1, v2, v3):
+    """
+    Calculate the angle at v2 formed by v1-v2-v3 in degrees.
+    """
+    a = np.array(v1) - np.array(v2)
+    b = np.array(v3) - np.array(v2)
+    cosine_angle = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    # Clamp the cosine_angle to the valid range to avoid numerical issues
+    cosine_angle = np.clip(cosine_angle, -1.0, 1.0)
+    angle = np.degrees(np.arccos(cosine_angle))
+    return angle
