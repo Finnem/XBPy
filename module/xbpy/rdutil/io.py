@@ -10,6 +10,8 @@ from rdkit.Chem.rdmolops import RenumberAtoms
 from .util import jump_to_nth_last_line
 from collections import defaultdict
 from pathlib import Path
+from .rw import proximity_bond
+from rdkit.Chem import rdmolops
 
 
 def determine_molecule_paths(paths, recursive = True):
@@ -207,7 +209,7 @@ def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True,
     import rdkit.Chem as Chem
 
     if os.path.splitext(path)[1] == ".xyz":
-        xyz_molecule = Chem.rdmolfiles.MolFromXYZFile(path)
+        mol = Chem.rdmolfiles.MolFromXYZFile(path)
         # we infer the bonds if requested
         if proximityBonding:
             mol = proximity_bond(mol)
@@ -357,7 +359,7 @@ def read_coord_file(path, reference_molecule = None, proximityBonding = True, to
     return [mol]
 
 
-def write_molecules(mols, path, file_type = None, batch_size = False, *args, **kwargs):
+def write_molecules(mols, path, file_type = None, batch_size = False, progress_indicator = False, *args, **kwargs):
     """ 
         Write molecules to a file or directory. Works for a single molecule or a list of molecules. 
         The file type can be inferred from the ending of the path or be explicitly given, in which case the ending will be overwritten.
@@ -374,70 +376,79 @@ def write_molecules(mols, path, file_type = None, batch_size = False, *args, **k
         file_type (str): Defaults to None. File type to write the molecules in. If None, the file type is inferred from the path.
         ending (str or function(mol, index)): Defaults to None. Ending to append to the file name. If None, the ending is inferred from the molecule.
         batch_size (int): Defaults to False. If not False, write the molecules in batches of the given size.
+        progress_indicator (bool): Defaults to False. If True, show a progress indicator.
 
     """
 
     import os
     from pathlib import Path
+    multiple = True
     if issubclass(type(mols), Chem.Mol):
         mols = [mols]
+        multiple = False
         
     base_paths_batch_count = defaultdict(int)
     sdf_handles = {}
     try:
+        if progress_indicator:
+            mols = tqdm(mols, desc = "Writing molecules")
         for i, mol in enumerate(mols):
+            try:
             # determine current path
-            if type(path) == list:
-                cur_path = path[i]
-            else:
-                cur_path = path
+                if type(path) == list:
+                    cur_path = path[i]
+                else:
+                    cur_path = path
 
-            # check if we should enfore file separation => if multiple files are given and the file type is not sdf
-            require_separation = (len(mols) > 1) and not ((file_type == "sdf") or ((type(cur_path) == str) and (cur_path.endswith(".sdf"))))
-            cur_path = _resolve_path(mol, i, cur_path, require_separation = require_separation)
+                # check if we should enfore file separation => if multiple files are given and the file type is not sdf
+                require_separation = multiple and not ((file_type == "sdf") or ((type(cur_path) == str) and (cur_path.endswith(".sdf"))))
+                cur_path = _resolve_path(mol, i, cur_path, require_separation = require_separation)
 
-            # determine file type
-            if file_type is None:
-                try:
-                    file_type = cur_path.suffix[1:]
-                except AttributeError:
-                    logging.warning("No file type specified and no file extension found. Defaulting to xyz.")
-                    file_type = "xyz"
-            if not cur_path.suffix:
-                cur_path = cur_path.with_suffix(f".{file_type}")
+                # determine file type
+                if file_type is None:
+                    try:
+                        file_type = cur_path.suffix[1:]
+                    except AttributeError:
+                        logging.warning("No file type specified and no file extension found. Defaulting to xyz.")
+                        file_type = "xyz"
+                if not cur_path.suffix:
+                    cur_path = cur_path.with_suffix(f".{file_type}")
 
-            # determine current batch for parent directory
-            if batch_size:
-                base_paths_batch_count[cur_path.parent] += 1
-                cur_batch = base_paths_batch_count[cur_path.parent] // batch_size
-                # create batch directory if necessary and inject it into the path
-                cur_path = cur_path.parent / f"batch_{cur_batch}{cur_path.name}" / cur_path.name
-                os.makedirs(cur_path.parent, exist_ok = True)
+                # determine current batch for parent directory
+                if batch_size:
+                    base_paths_batch_count[cur_path.parent] += 1
+                    cur_batch = base_paths_batch_count[cur_path.parent] // batch_size
+                    # create batch directory if necessary and inject it into the path
+                    cur_path = cur_path.parent / f"batch_{cur_batch}" /  Path(str(i)+"_" + cur_path.name)
+                    os.makedirs(cur_path.parent, exist_ok = True)
 
-            cur_path = str(cur_path)
-            if file_type == "xyz":
-                Chem.MolToXYZFile(mol, cur_path)
-            elif file_type == "mol":
-                Chem.MolToMolFile(mol, cur_path)
-            elif file_type == "sdf":
-                #cur_handle = sdf_handles.get(cur_path, Chem.SDWriter(cur_path))
-                with open(cur_path, "a") as f:
-                    # TODO not the best way to handle this, however keeping SDWriter open seems to result in null-bytes
-                    cur_handle = Chem.SDWriter(f)
-                    cur_handle.write(mol)
-                    cur_handle.flush()
-                    cur_handle.close()
-                sdf_handles[cur_path] = cur_handle
-            elif file_type == "pdb":
-                Chem.MolToPDBFile(mol, cur_path)
-            # rest could be better implemented by importing pymol and using its functions
-            # need to figure out how to pass molecules from rdkit to pymol => maybe new module?
-            elif file_type == "mae":
-                raise NotImplementedError("Writing to mae files is not yet implemented.")
-            elif file_type == "maegz":
-                raise NotImplementedError("Writing to maegz files is not yet implemented.")
-            elif file_type == "mol2":
-                raise NotImplementedError("Writing to mol2 files is not yet implemented.")
+                cur_path = str(cur_path)
+                if file_type == "xyz":
+                    Chem.MolToXYZFile(mol, cur_path)
+                elif file_type == "mol":
+                    Chem.MolToMolFile(mol, cur_path)
+                elif file_type == "sdf":
+                    #cur_handle = sdf_handles.get(cur_path, Chem.SDWriter(cur_path))
+                    with open(cur_path, "a") as f:
+                        # TODO not the best way to handle this, however keeping SDWriter open seems to result in null-bytes
+                        cur_handle = Chem.SDWriter(f)
+                        cur_handle.write(mol)
+                        cur_handle.flush()
+                        cur_handle.close()
+                    sdf_handles[cur_path] = cur_handle
+                elif file_type == "pdb":
+                    Chem.MolToPDBFile(mol, cur_path)
+                # rest could be better implemented by importing pymol and using its functions
+                # need to figure out how to pass molecules from rdkit to pymol => maybe new module?
+                elif file_type == "mae":
+                    raise NotImplementedError("Writing to mae files is not yet implemented.")
+                elif file_type == "maegz":
+                    raise NotImplementedError("Writing to maegz files is not yet implemented.")
+                elif file_type == "mol2":
+                    raise NotImplementedError("Writing to mol2 files is not yet implemented.")
+            except:
+                logging.warning(f"Failed to write molecule {i} to {cur_path}.")
+                raise
     finally:
         for handle in sdf_handles.values():
             ...#handle.close()

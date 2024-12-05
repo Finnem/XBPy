@@ -8,6 +8,7 @@ from .geometry import position
 from .geometry import positions
 from .geometry import transform
 from .geometry import check_occlusion
+from .geometry import score_overlap
 from .select import get_connected_atoms
 from .select import vdw_radius
 from .select import select_atom

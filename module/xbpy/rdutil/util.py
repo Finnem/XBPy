@@ -47,14 +47,14 @@ bond_lengths = defaultdict(
                 "Br": [1.94, 0, 0, 0],
                 "F": [1.35, 0, 0, 0],
                 "S": [1.82, 1.73, 1.71, 0],
-                "N": [1.47, 1.36, 1.29, 1.16],
-                "O": [1.43, 1.36, 1.25, 0],
+                "N": [1.46, 1.36, 1.29, 1.16],
+                "O": [1.43, 1.36, 1.30, 0],
                 "P": [1.84, 0, 0, 0],
                 "C": [1.54, 1.4, 1.34, 1.2],
     }),
     "N" : defaultdict(lambda: [1.45, 1.25, 1.25, 0], {
                 "N": [1.45, 1.35, 1.25, 0],
-                "O": [1.40, 1.3, 1.21, 0],
+                "O": [1.40, 1.3, 1.26, 0],
                 "S": [1.75, 1.6, 1.53, 0],
     }),
     "O" : defaultdict(lambda: [1.45, 1.35, 1.35, 0], {
@@ -190,125 +190,158 @@ def get_covalent_radius(element_symbol):
 
 possible_geometries = {
     "H": {
-        1: {
+        (1, 0): {
             "angles": [],
             "bond_orders": [1],
         }
     },
     "C": {
-        1: {
+        (1, 0) : {
             "angles": [],
             "bond_orders": [3],
         },
-        2: {
+        (2, 0): {
             "angles": [180],
             "bond_orders": [1, 2, 3],
         },
-        3: {
+        (3, 0): {
             "angles": [120],
             "bond_orders": [1, 2],
         },
-        4: {
+        (4, 0): {
             "angles": [109.5],
             "bond_orders": [1],
         }
     },
     "N": {
-        1: {
+        (1, 0): {
             "angles": [],
             "bond_orders": [3],
         },
-        2: {
+        (2, 1): {
             "angles": [180],
-            "bond_orders": [2, 3],
+            "bond_orders": [1, 2, 3],
         },
-        3: {
+        (2, 0): {
+            "angles": [180],
+            "bond_orders": [1, 2],
+        },
+        (3, 0): {
             "angles": [107],
             "bond_orders": [1],
         },
-        4: {
+        (3, 1): {
+            "angles": [120],
+            "bond_orders": [1, 2],
+        },
+
+        (4, 1): {
             "angles": [109.5],
             "bond_orders": [1],
         }
     },
     "O": {
-        1: {
+        (1, 0) : {
             "angles": [],
             "bond_orders": [2],
         },
-        2: {
+        (1, -1) : {
+            "angles": [],
+            "bond_orders": [1],
+        },
+        (2, 0): {
             "angles": [104.5],
             "bond_orders": [1],
         },
-        3: {
+        (3, 0): {
             "angles": [107],
             "bond_orders": [1],
         }
     },
     "F": {
-        1: {
+        (1, 0): {
             "angles": [],
             "bond_orders": [1],
         }
     },
     "Cl": {
-        1: {
+        (1, 0): {
             "angles": [],
             "bond_orders": [1],
         }
     },
     "Br": {
-        1: {
+        (1, 0): {
             "angles": [],
             "bond_orders": [1],
         }
     },
     "I": {
-        1: {
+        (1, 0): {
             "angles": [],
             "bond_orders": [1],
         }
     },
     "B": {
-        3: {
+        (3, 0): {
             "angles": [120],
             "bond_orders": [1],
         },
-        4: {
+        (4, -1): {
             "angles": [109.5],
             "bond_orders": [1],
         }
     },
     "Si": {
-        4: {
+        (4, 0): {
             "angles": [109.5],
             "bond_orders": [1],
         }
     },
     "P": {
-        3: {
+        (3, 0): {
             "angles": [93],  # Due to lone pairs
             "bond_orders": [1],
         },
-        4: {
+        (4, 1): {
             "angles": [109.5],
             "bond_orders": [1],
         },
-        5: {
+        (4, 0): {
+            "angles": [109.5],
+            "bond_orders": [1, 2],
+        },
+        (5, 0): {
             "angles": [90, 120],
             "bond_orders": [1],
         }
     },
     "S": {
-        2: {
-            "angles": [119],
+         (1, 0) : {
+            "angles": [],
             "bond_orders": [2],
         },
-        4: {
-            "angles": [109.5],
+        (1, -1) : {
+            "angles": [],
             "bond_orders": [1],
         },
-        6: {
+        (2, 0): {
+            "angles": [104.5],
+            "bond_orders": [1],
+        },
+        (3, 0): {
+            "angles": [107],
+            "bond_orders": [1],
+        },
+        (4, 2): {
+            "angles": [101.3, 109.5, 123.3],
+            "bond_orders": [1, 2],
+        },
+        (4, 0): {
+            "angles": [101.3, 109.5, 123.3],
+            "bond_orders": [1],
+        },
+        (6, 2): {
             "angles": [90],
             "bond_orders": [1],
         }

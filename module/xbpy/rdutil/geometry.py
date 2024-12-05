@@ -3,23 +3,65 @@ from rdkit import Chem
 import numpy as np
 import logging
 from scipy.spatial import cKDTree
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, coo_matrix
 
 class AtomKDTree():
     def __init__(self, atoms):
         vdw_radii = np.array([Chem.GetPeriodicTable().GetRvdw(atom.GetAtomicNum()) for atom in atoms])
-        self.trees = []
-        for vdw_radius in np.unique(vdw_radii):
+        elements = np.array([atom.GetAtomicNum() for atom in atoms])
+        self.trees = {}
+        for vdw_radius, vdw_index in zip(*np.unique(vdw_radii, return_index = True)):
             tree = cKDTree(position(atoms)[vdw_radii == vdw_radius])
-            self.trees.append((vdw_radius, tree))
+            self.trees[elements[vdw_index]] = (vdw_radius, tree)
 
-    def query_ball_point(self, points, radius):
+    def query_ball_point(self, points, radius, element = None):
         indices = [set() for _ in range(len(points))]
-        for vdw_radius, tree in self.trees:
+        if element == None:
+            considered_trees = self.trees.keys()
+        else:
+            considered_trees = [element]
+        for key in considered_trees:
+            vdw_radius, tree in self.trees[key]
             query_result = tree.query_ball_point(points, radius + vdw_radius)
             for i, result in enumerate(query_result):
                 indices[i].update(result)
         return indices
+
+    def query_ball_tree(self, other, radius, element = None):
+        indices = [set() for _ in range(len(self.trees))]
+        if element == None:
+            considered_trees = self.trees.keys()
+        else:
+            considered_trees = [element]
+        for key in considered_trees:
+            if key not in other.trees:
+                continue
+            vdw_radius, tree = self.trees[key]
+            query_result = tree.query_ball_tree(other.trees[key][1], radius + vdw_radius)
+            for i, result in enumerate(query_result):
+                indices[i].update(result)
+        return indices
+
+
+    def sparse_distance_matrix(self, other, max_distance, element = None):
+        if element == None:
+            considered_trees = self.trees.keys()
+        else:
+            considered_trees = [element]
+        data = []
+        row = []
+        col = []
+        for key in considered_trees:
+            if key not in other.trees:
+                continue
+            vdw_radius, tree = self.trees[key]
+            query_result = tree.sparse_distance_matrix(other.trees[key][1], max_distance + vdw_radius, output_type = 'coo_matrix')
+            data.append(query_result.data)
+            row.append(query_result.row)
+            col.append(query_result.col)
+        if sum([len(a) for a in data]) == 0:
+            return csr_matrix((0,0))
+        return coo_matrix((np.concatenate(data), (np.concatenate(row), np.concatenate(col))))
 
 def positions(*args, **kwargs):
     return position(*args, **kwargs)
@@ -167,4 +209,65 @@ def check_occlusion(from_atoms, to_atoms, potential_occluders, return_occluders 
         return occluded.any(axis = -1) & (from_projection_caps < to_projection_caps)
 
 
+
+def score_overlap(l1, l2, occupation_max = 5, similarity_max = 5):
+    """
+    Scores overlap between two molecules. Score is determined by:
+        RMSD of:
+            for each atom in l1:
+                min(minimum distance to any atom in l2, occupation_max) + min(minimum distance to any atom of same element in l2, similarity_max)
+        Devided by 2
+
+    Args:
+        l1 (list): Rdkit Mol, list of atoms or atomkdtree of first molecule.
+        l2 (list): Rdkit Mol, list of atoms or atomkdtree of second molecule.
+        ocupation_max (float): Defaults to 5. Maximum distance to consider for occupation.
+        similarity_max (float): Defaults to 5. Maximum distance to consider for similarity.
+
+    Returns:
+        float: Score of the overlap.
+
+    """
+    if isinstance(l1, AtomKDTree):
+        l1 = l1
+    elif isinstance(l1, list):
+        l1 = AtomKDTree(l1)
+    elif isinstance(l1, Chem.rdchem.Mol):
+        l1 = AtomKDTree(l1.GetAtoms())
+    else:
+        raise TypeError("l1 must be a list of atoms, an rdkit molecule or an Atom")
+    if isinstance(l2, AtomKDTree):
+        l2 = l2
+    elif isinstance(l2, list):
+        l2 = AtomKDTree(l2)
+    elif isinstance(l2, Chem.rdchem.Mol):
+        l2 = AtomKDTree(l2.GetAtoms())
+    else:
+        raise TypeError("l2 must be a list of atoms, an rdkit molecule or an Atom")
+    
+    score = 0
+    # occupation check
+    distance_matrix = l1.sparse_distance_matrix(l2, occupation_max).tocsr()
+    distance_matrix.eliminate_zeros()
+    min_distance = np.minimum.reduceat(distance_matrix.data, distance_matrix.indptr[:-1])
+    min_distance[min_distance == 0] = occupation_max
+    #occupations_scores = min_distance
+    score += np.sqrt(np.mean(min_distance**2))
+
+    # similarity check
+    min_distances = []
+    for element in l1.trees.keys():
+        if element not in l2.trees.keys():
+            continue
+        distance_matrix = l1.sparse_distance_matrix(l2, similarity_max, element).tocsr()
+        distance_matrix.eliminate_zeros()
+        min_distance = np.minimum.reduceat(distance_matrix.data, distance_matrix.indptr[:-1])
+        min_distance[min_distance == 0] = occupation_max
+        min_distances.extend(min_distance)
+        #occupations_scores += min_distance
+    min_distances = np.array(min_distances)
+    score += np.sqrt(np.mean(min_distances**2))
+
+    score = score / 2
+    return score
 
