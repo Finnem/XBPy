@@ -187,164 +187,241 @@ def get_covalent_radius(element_symbol):
     except:
         raise ValueError(f"Unknown element symbol: {element_symbol}")
 
-
+# we assume kekulized structures e.g. sp2 hybridized carbon => 2 single and one double bond
+# dictionary maps Symbols to possible (bond count, charge, angles) and the associated bond orders and electrons potentially contributed to a pi system
 possible_geometries = {
     "H": {
         (1, 0): {
-            "angles": [],
-            "bond_orders": [1],
+            (): {
+                "bond_orders": [{1.0: 1}],
+                "pi_contributing": 0,
+            }
         }
     },
     "C": {
-        (1, 0) : {
-            "angles": [],
-            "bond_orders": [3],
+        (1, -1): {
+            (): {
+                "bond_orders": [{3.0: 1}],
+                "pi_contributing": 1,
+            }
         },
         (2, 0): {
-            "angles": [180],
-            "bond_orders": [1, 2, 3],
+            (180,): {
+                "bond_orders": [{3.0: 1, 1.0: 1}, {2.0: 2}],
+                "pi_contributing": 1,
+            }
         },
         (3, 0): {
-            "angles": [120],
-            "bond_orders": [1, 2],
+            (120,): {
+                "bond_orders": [{1.0: 2, 2.0: 1}],
+                "pi_contributing": 1,
+            },
+            (108, 126): {
+                "bond_orders": [{1.0: 2, 2.0: 1}],
+                "pi_contributing": 1,
+                "ring_requirement": 5,
+            },
         },
         (4, 0): {
-            "angles": [109.5],
-            "bond_orders": [1],
+            (109.5,): {
+                "bond_orders": [{1.0: 4}],
+            }
         }
     },
     "N": {
         (1, 0): {
-            "angles": [],
-            "bond_orders": [3],
+            (): {
+                "bond_orders": [{3.0: 1}],
+                "pi_contributing": 1,
+            }
         },
         (2, 1): {
-            "angles": [180],
-            "bond_orders": [1, 2, 3],
+            (180,): {
+                "bond_orders": [{1.0: 1, 3.0: 1}, {2.0: 2, 2.0: 2}],
+                "pi_contributing": 1,
+            },
         },
         (2, 0): {
-            "angles": [180],
-            "bond_orders": [1, 2],
+            (180,): {
+                "bond_orders": [{1.0: 1, 2.0: 1}],
+                "pi_contributing": 1,
+            },
+            (108, 126): {
+                "bond_orders": [{1.0: 1, 2.0: 1}],
+                "pi_contributing": 1,
+                "ring_requirement": 5,
+            },
+            (120,): {
+                "bond_orders": [{1.0: 1, 2.0: 1}],
+                "pi_contributing": 1,
+            },
         },
         (3, 0): {
-            "angles": [107],
-            "bond_orders": [1],
+            (120,): {
+                "bond_orders": [{1.0: 3}],
+                "pi_contributing": 2,
+            },
+            (107, 126): {
+                "bond_orders": [{1.0: 3}],
+                "pi_contributing": 2,
+                "ring_requirement": 5,
+            },
         },
         (3, 1): {
-            "angles": [120],
-            "bond_orders": [1, 2],
+            (107,): {
+                "bond_orders": [{1.0: 2, 2.0: 1}],
+                "pi_contributing": 1,
+                "ring_requirement": 5,
+            },
+            (120,): {
+                "bond_orders": [{1.0: 2, 2.0: 1}],
+                "pi_contributing": 1,
+            },
         },
-
         (4, 1): {
-            "angles": [109.5],
-            "bond_orders": [1],
+            (109.5,): {
+                "bond_orders": [{1.0: 4}],
+            }
         }
     },
     "O": {
-        (1, 0) : {
-            "angles": [],
-            "bond_orders": [2],
+        (1, 0): {
+            (): {
+                "bond_orders": [{2.0: 1}],
+                "pi_contributing": 1, 
+            }
         },
-        (1, -1) : {
-            "angles": [],
-            "bond_orders": [1],
+        (1, -1): {
+            (): {
+                "bond_orders": [{1.0: 1}],
+            }
         },
         (2, 0): {
-            "angles": [104.5],
-            "bond_orders": [1],
+            (106,): {
+                "bond_orders": [{1.0: 2}],
+                "ring_requirement": 5,
+                "pi_contributing": 2
+            },
+            (120,): {
+                "bond_orders": [{1.0: 2}],
+                "ring_requirement": 6,
+                "pi_contributing": 2
+            },
+            (106,): {
+                "bond_orders": [{1.0: 2}],
+                "pi_contributing": 0
+            },
         },
-        (3, 0): {
-            "angles": [107],
-            "bond_orders": [1],
-        }
     },
     "F": {
         (1, 0): {
-            "angles": [],
-            "bond_orders": [1],
+            (): {
+                "bond_orders": [{1.0: 1}],
+            }
         }
     },
     "Cl": {
         (1, 0): {
-            "angles": [],
-            "bond_orders": [1],
+            (): {
+                "bond_orders": [{1.0: 1}],
+            }
         }
     },
     "Br": {
         (1, 0): {
-            "angles": [],
-            "bond_orders": [1],
+            (): {
+                "bond_orders": [{1.0: 1}],
+            }
         }
     },
     "I": {
         (1, 0): {
-            "angles": [],
-            "bond_orders": [1],
+            (): {
+                "bond_orders": [{1.0: 1}],
+            }
         }
     },
     "B": {
         (3, 0): {
-            "angles": [120],
-            "bond_orders": [1],
+            (120,): {
+                "bond_orders": [{1.0: 3}],
+            }
         },
         (4, -1): {
-            "angles": [109.5],
-            "bond_orders": [1],
+            (109.5,): {
+                "bond_orders": [{1.0: 4}],
+            }
         }
     },
     "Si": {
         (4, 0): {
-            "angles": [109.5],
-            "bond_orders": [1],
+            (109.5,): {
+                "angles": [109.5],
+                "bond_orders": [{1.0: 4}],
+            }
         }
     },
     "P": {
         (3, 0): {
-            "angles": [93],  # Due to lone pairs
-            "bond_orders": [1],
+            (100,): {  # Trigonal Pyramidal
+                "bond_orders": [{1.0: 3}],
+            }
         },
         (4, 1): {
-            "angles": [109.5],
-            "bond_orders": [1],
+            (109.5,): {
+                "angles": [109.5],
+                "bond_orders": [{1.0: 4}],
+            }
         },
         (4, 0): {
-            "angles": [109.5],
-            "bond_orders": [1, 2],
+            (109.5,): {  # as in phosphoric acid
+                "bond_orders": [{1.0: 3, 2.0: 1}],
+            }
         },
         (5, 0): {
-            "angles": [90, 120],
-            "bond_orders": [1],
+            (90, 120): {
+                "bond_orders": [{1.0: 5}],
+            }
         }
     },
     "S": {
-         (1, 0) : {
-            "angles": [],
-            "bond_orders": [2],
+        (1, 0): {
+            (): {
+                "bond_orders": [{2.0: 1}],
+            }
         },
-        (1, -1) : {
-            "angles": [],
-            "bond_orders": [1],
+        (1, -1): {
+            (): {
+                "bond_orders": [{1.0: 1}],
+            }
         },
         (2, 0): {
-            "angles": [104.5],
-            "bond_orders": [1],
+            (100,): {  # bent
+                "bond_orders": [{1.0: 2}],
+            }
         },
         (3, 0): {
-            "angles": [107],
-            "bond_orders": [1],
-        },
-        (4, 2): {
-            "angles": [101.3, 109.5, 123.3],
-            "bond_orders": [1, 2],
+            (90,): {  # T-shaped
+                "bond_orders": [{1.0: 3}],
+            }
         },
         (4, 0): {
-            "angles": [101.3, 109.5, 123.3],
-            "bond_orders": [1],
+            (101.3, 109.5, 123.3): {  # sulfuric acid
+                "bond_orders": [{1.0: 2, 2.0: 2}],
+            }
         },
-        (6, 2): {
-            "angles": [90],
-            "bond_orders": [1],
+        (6, 0): {
+            (90,): {
+                "bond_orders": [{1.0: 6}],
+            }
         }
     }
 }
-
+# fill up all bond_order values for bond orders 0.0, 1.0, 2.0 and 3.0 with 0
+for atom in possible_geometries:
+    for valence in possible_geometries[atom]:
+        for angles in possible_geometries[atom][valence]:
+            for bond_order in possible_geometries[atom][valence][angles]["bond_orders"]:
+                for bo in [1.0, 2.0, 3.0]:
+                    if bo not in bond_order:
+                        bond_order[bo] = 0

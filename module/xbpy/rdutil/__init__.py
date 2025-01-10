@@ -9,6 +9,8 @@ from .geometry import positions
 from .geometry import transform
 from .geometry import check_occlusion
 from .geometry import score_overlap
+from .geometry import AtomKDTree
+from .geometry import is_planar
 from .select import get_connected_atoms
 from .select import vdw_radius
 from .select import select_atom
@@ -19,7 +21,7 @@ from .rw import keep_atoms
 from .rw import copy_props
 from .rw import add_explicit_hydrogens
 from .rw import proximity_bond
-from .rw import correct_valence
 from .rw import build_molecule
 from .binding_pockets import get_binding_pockets_by_ligand, get_grid_neighbors
 from .draw import draw_molecule
+from .bond_order_inference import correct_bond_orders

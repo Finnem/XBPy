@@ -208,15 +208,39 @@ def check_occlusion(from_atoms, to_atoms, potential_occluders, return_occluders 
         # if van der waals radii intersect, we assume no occlusion can happen
         return occluded.any(axis = -1) & (from_projection_caps < to_projection_caps)
 
+def is_planar(atoms, threshold = 15):
+    """
+    Check if the given atoms are planar. The atoms are considered planar if the angle between any normal and an arbitrary reference normal is greater than threshold.
+
+    Args:
+        atoms (list): List of atoms to check for planarity.
+        threshold (float): Defaults to 5. Threshold for the angle between the normal of the plane and the z-axis.
+
+    Returns:
+        bool: True if the atoms are planar, False otherwise.
+
+    """
+    atoms = position(atoms)
+    atoms -= np.mean(atoms, axis = 0)
+    reference_normal = np.cross(atoms[1] - atoms[0], atoms[2] - atoms[0])
+    reference_normal /= np.linalg.norm(reference_normal)
+    for i in range(3, len(atoms)):
+        normal = np.cross(atoms[i] - atoms[0], atoms[0] - atoms[2])
+        normal /= np.linalg.norm(normal)
+        angle = np.arccos(np.clip(np.dot(normal, reference_normal), -1.0, 1.0)) * 180 / np.pi 
+        if angle > threshold:
+            return False
+    return True
 
 
 def score_overlap(l1, l2, occupation_max = 5, similarity_max = 5):
     """
-    Scores overlap between two molecules. Score is determined by:
+    Scores overlap of l1 to l2, i.e. how much l1 lies within l2. Score is determined by:
         RMSD of:
             for each atom in l1:
                 min(minimum distance to any atom in l2, occupation_max) + min(minimum distance to any atom of same element in l2, similarity_max)
         Devided by 2
+    In order to only consider occupation or similarity, set the respective other max value to 0.
 
     Args:
         l1 (list): Rdkit Mol, list of atoms or atomkdtree of first molecule.
@@ -246,27 +270,30 @@ def score_overlap(l1, l2, occupation_max = 5, similarity_max = 5):
         raise TypeError("l2 must be a list of atoms, an rdkit molecule or an Atom")
     
     score = 0
-    # occupation check
-    distance_matrix = l1.sparse_distance_matrix(l2, occupation_max).tocsr()
-    distance_matrix.eliminate_zeros()
-    min_distance = np.minimum.reduceat(distance_matrix.data, distance_matrix.indptr[:-1])
-    min_distance[min_distance == 0] = occupation_max
-    #occupations_scores = min_distance
-    score += np.sqrt(np.mean(min_distance**2))
 
-    # similarity check
-    min_distances = []
-    for element in l1.trees.keys():
-        if element not in l2.trees.keys():
-            continue
-        distance_matrix = l1.sparse_distance_matrix(l2, similarity_max, element).tocsr()
+    if not occupation_max == 0:
+        # occupation check
+        distance_matrix = l1.sparse_distance_matrix(l2, occupation_max).tocsr()
         distance_matrix.eliminate_zeros()
         min_distance = np.minimum.reduceat(distance_matrix.data, distance_matrix.indptr[:-1])
         min_distance[min_distance == 0] = occupation_max
-        min_distances.extend(min_distance)
-        #occupations_scores += min_distance
-    min_distances = np.array(min_distances)
-    score += np.sqrt(np.mean(min_distances**2))
+        #occupations_scores = min_distance
+        score += np.sqrt(np.mean(min_distance**2))
+
+    # similarity check
+    if not similarity_max == 0:
+        min_distances = []
+        for element in l1.trees.keys():
+            if element not in l2.trees.keys():
+                continue
+            distance_matrix = l1.sparse_distance_matrix(l2, similarity_max, element).tocsr()
+            distance_matrix.eliminate_zeros()
+            min_distance = np.minimum.reduceat(distance_matrix.data, distance_matrix.indptr[:-1])
+            min_distance[min_distance == 0] = occupation_max
+            min_distances.extend(min_distance)
+            #occupations_scores += min_distance
+        min_distances = np.array(min_distances)
+        score += np.sqrt(np.mean(min_distances**2))
 
     score = score / 2
     return score

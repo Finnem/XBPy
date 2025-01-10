@@ -12,6 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 from .rw import proximity_bond
 from rdkit.Chem import rdmolops
+from rdkit.Chem.PropertyMol import PropertyMol
 
 
 def determine_molecule_paths(paths, recursive = True):
@@ -36,13 +37,20 @@ def determine_molecule_paths(paths, recursive = True):
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
     return molecule_paths
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=True, reset_index = False, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=True, reset_index = False, as_property_mol = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
     Args:
         path (str or list(str)): Path to a file or directory. May be a list of paths. A path may also describe a glob pattern.
         recursive (bool): Defaults to True. If True, recursively search directories for files. 
+        store_path (bool): Defaults to False. If True, store the path of the molecule in the molecule's properties.
+        reference_molecule (RDKit.Mol): Reference molecule to use as a template.
+        removeHs (bool): Defaults to False. If True, remove hydrogens from the molecule.
+        sanitize (bool): Defaults to False. If True, sanitize the molecule.
+        proximityBonding (bool): Defaults to True. If True, infer bonds from the xyz block. If False, use the reference molecule as a template.
+        reset_index (bool): Defaults to False. If True, reset the atom indices of the molecule.
+        as_property_mol (bool): Defaults to False. If True, return the molecule as a property molecule. Necessary to keep properties when pickling etc.
         *args: Additional arguments to pass to the RDKit reader.
         **kwargs: Additional keyword arguments to pass to the RDKit reader.
 
@@ -62,14 +70,14 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
     # Loop over all paths, seperated from tree walk to allow for error detection (emtpy paths)
     molecule_paths = determine_molecule_paths(paths, recursive=recursive)
     for path in sorted(molecule_paths):
-        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, *args, **kwargs)
+        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, as_property_mol=as_property_mol, *args, **kwargs)
         for mol in path_molecules:
             if reset_index:
                 from ..morgan import unique_index
                 new_indices = unique_index(mol)
                 ordering = np.argsort(new_indices)
                 mol = RenumberAtoms(mol, [int(i) for i in ordering])
-            yield mol
+            yield PropertyMol(mol) if as_property_mol else mol
 
 
 def get_num_molecules(paths, recursive = True, *args, **kwargs):
@@ -120,7 +128,7 @@ def _get_num_mols(path, *args, **kwargs):
 
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -151,7 +159,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     elif os.path.splitext(path)[1] == ".maegz":
         molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
-        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, *args, **kwargs)
+        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, *args, **kwargs)
     else:
         try:
             molecules = read_coord_file(path, reference_molecule, proximityBonding=proximityBonding, *args, **kwargs)
@@ -193,7 +201,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     return molecules
 
 
-def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, *args, **kwargs):
+def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -212,8 +220,8 @@ def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True,
         mol = Chem.rdmolfiles.MolFromXYZFile(path)
         # we infer the bonds if requested
         if proximityBonding:
-            mol = proximity_bond(mol)
-            rdmolops.RemoveHs(mol, implicitOnly=False, updateExplicitCount=False, sanitize=False)
+            mol = proximity_bond(mol, as_property_mol=as_property_mol)
+            #rdmolops.RemoveHs(mol, implicitOnly=False, updateExplicitCount=False, sanitize=False) # TODO: why was this here?
 
         # finally we use the reference molecule to copy the bonds if sensible
         if not (reference_molecule is None):
