@@ -159,65 +159,57 @@ def rigid_transform(A, B, sanity_check_tolerance=None):
     """Find the rigid transformation that aligns A to B.
 
     Args:
-        A (np.ndarray): 3xN matrix of N 3D points.
-        B (np.ndarray): 3xN matrix of N 3D points.
+        A (np.ndarray): Nx3 matrix of N 3D points.
+        B (np.ndarray): Nx3 matrix of N 3D points.
+        sanity_check_tolerance (float, optional): Maximum allowable deviation for sanity check.
 
     Returns:
-        tuple(np.ndarray, np.ndarray): Rotation matrix, translation vector.
-    
+        tuple(np.ndarray, np.ndarray): Rotation matrix (3x3), translation vector (3,).
     """
+    if A.shape != B.shape:
+        raise ValueError(f"Shape mismatch: A has shape {A.shape}, B has shape {B.shape}")
 
-    # taken from https://github.com/nghiaho12/rigid_transform_3D/blob/master/rigid_transform_3D.py
-    assert A.shape == B.shape
+    if A.shape[1] != 3:
+        raise ValueError(f"Input matrices must have shape Nx3, but got {A.shape}")
 
-    num_rows, num_cols = A.shape
-    if num_cols != 3:
-        raise Exception(f"matrix A is not Nx3, it is {num_rows}x{num_cols}")
+    A, B = A.T, B.T  # Transpose to 3xN for calculations
 
-    num_rows, num_cols = B.shape
-    if num_cols != 3:
-        raise Exception(f"matrix B is not Nx3, it is {num_rows}x{num_cols}")
-
-    A = A.T
-    B = B.T
-
+    # Sanity check: Ensure pairwise distances remain consistent
     if sanity_check_tolerance is not None:
-        pairwise_distances_1 = np.linalg.norm(A[:, None, :] - B[None, :, :], axis=-1)
-        pairwise_distances_2 = np.linalg.norm(A[:, None, :] - B[None, :, :], axis=-1)
-        if np.max(np.abs(pairwise_distances_1 - pairwise_distances_2).flatten()) > sanity_check_tolerance:
-            print(f"Pairwise distances deviate by {np.max(np.abs(pairwise_distances_1 - pairwise_distances_2).flatten())}. It is likely the points were not chosen well.")
+        pairwise_distances_A = np.linalg.norm(A[:, None, :] - A[None, :, :], axis=-1)
+        pairwise_distances_B = np.linalg.norm(B[:, None, :] - B[None, :, :], axis=-1)
+        max_deviation = np.max(np.abs(pairwise_distances_A - pairwise_distances_B))
+        if max_deviation > sanity_check_tolerance:
+            print(f"Pairwise distances deviate by {max_deviation:.6f}. Possible misalignment in points.")
 
+    # Compute centroids
+    centroid_A = np.mean(A, axis=1, keepdims=True)
+    centroid_B = np.mean(B, axis=1, keepdims=True)
 
-    # find mean column wise
-    centroid_A = np.mean(A, axis=1)
-    centroid_B = np.mean(B, axis=1)
+    # Subtract centroids
+    Am, Bm = A - centroid_A, B - centroid_B
 
-    # ensure centroids are 3x1
-    centroid_A = centroid_A.reshape(-1, 1)
-    centroid_B = centroid_B.reshape(-1, 1)
+    # Compute covariance matrix
+    H = Am @ Bm.T
 
-    # subtract mean
-    Am = A - centroid_A
-    Bm = B - centroid_B
+    # Compute SVD
+    U, _, Vt = np.linalg.svd(H)
 
-    H = Am @ np.transpose(Bm)
-
-    # find rotation
-    U, S, Vt = np.linalg.svd(H)
-    u_det = np.linalg.det(U)
-    v_det = np.linalg.det(Vt)
+    # Compute rotation matrix
     R = Vt.T @ U.T
 
-    # special reflection case
+    # Handle reflection case
     if np.linalg.det(R) < 0:
-        logging.debug("det(R) < R, reflection detected!, correcting for it ...")
-        Vt[2,:] *= -1
-        R = Vt.T @ np.diag([1, 1, u_det * v_det]) @ U.T
+        logging.warning("det(R) < 0, reflection detected! Correcting...")
+        Vt[2, :] *= -1
+        R = Vt.T @ U.T
 
-    t = -R @ centroid_A + centroid_B
+    # Compute translation vector
+    t = centroid_B - R @ centroid_A
 
     return R, t.flatten()
 
+    
 def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_radius, point_distance, smooth_distance = 3):
     """ Sample the solvent accessible surface of the given atoms. Not intended for use with large molecules.
     

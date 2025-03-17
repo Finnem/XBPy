@@ -367,7 +367,7 @@ def read_coord_file(path, reference_molecule = None, proximityBonding = True, to
     return [mol]
 
 
-def write_molecules(mols, path, file_type = None, batch_size = False, progress_indicator = False, *args, **kwargs):
+def write_molecules(mols, path, file_type = None, batch_size = False, progress_indicator = False, append = False, *args, **kwargs):
     """ 
         Write molecules to a file or directory. Works for a single molecule or a list of molecules. 
         The file type can be inferred from the ending of the path or be explicitly given, in which case the ending will be overwritten.
@@ -391,6 +391,8 @@ def write_molecules(mols, path, file_type = None, batch_size = False, progress_i
     import os
     from pathlib import Path
     multiple = True
+    if (not append) and (os.path.exists(path)) and (not (os.path.isdir(path))):
+        os.remove(path)
     if issubclass(type(mols), Chem.Mol):
         mols = [mols]
         multiple = False

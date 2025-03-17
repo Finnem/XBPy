@@ -1,7 +1,6 @@
 from rdkit import Chem
 from rdkit.Chem import Draw
 from rdkit.Chem.Draw import rdMolDraw2D
-from IPython.display import SVG, display
 
 def draw_molecule(mol, highlights = None, highlight_color = (0, 0.8, 0, .8), height= 400, width = 400, labels = "indices", *args, **kwargs):
     """ Draw a molecule with highlights.
@@ -19,6 +18,7 @@ def draw_molecule(mol, highlights = None, highlight_color = (0, 0.8, 0, .8), hei
     Returns:
         IPython.display.SVG: SVG of the molecule.
     """
+    from IPython.display import SVG, display
     if highlights is None:
         highlights = []
     highlight_atoms = set()

@@ -79,7 +79,8 @@ def morgan_prop(mol, indices = None, return_history = False, just_topology = Fal
     element_vector = np.ones(len(atoms)) if just_topology else np.array([a.GetAtomicNum() for a in atoms], dtype = float)
     last_unique = None
     if return_history: history = [np.zeros(len(atoms)), element_vector]
-    while last_unique != (last_unique := len(np.unique(element_vector))):
+    while last_unique != len(np.unique(element_vector)):
+        last_unique = len(np.unique(element_vector))
         element_vector = adjacency_matrix @ element_vector
         if return_history: history.append(element_vector)
     if return_history:

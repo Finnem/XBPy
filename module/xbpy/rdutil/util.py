@@ -1,5 +1,6 @@
 
 from collections import defaultdict
+from rdkit import Chem
 
 # lengths are taken from pymol: https://github.com/schrodinger/pymol-open-source/blob/9d3061ca58d8b69d7dad74a68fc13fe81af0ff8e/layer2/AtomInfo.cpp
 
@@ -27,6 +28,15 @@ simplified_bond_lengths = defaultdict(
     }),
     "S" : defaultdict(lambda: 1.82, {
                 "S": 2.05,
+    }),
+    "Br": defaultdict(lambda: 1.94, {
+                "Br": 2.28,
+    }),
+    "Cl": defaultdict(lambda: 1.77, {
+                "Cl": 1.99,
+    }),
+    "I": defaultdict(lambda: 2.14, {
+                "I": 2.67,
     }),
 })
 
@@ -63,6 +73,15 @@ bond_lengths = defaultdict(
     }),
     "S" : defaultdict(lambda: [1.82, 0, 0, 0], {
                 "S": [2.05, 0, 0, 0],
+    }),
+    "Br": defaultdict(lambda: [1.94, 0, 0, 0], {
+                "Br": [2.28, 0, 0, 0],
+    }),
+    "Cl": defaultdict(lambda: [1.77, 0, 0, 0], {
+                "Cl": [1.99, 0, 0, 0],
+    }),
+    "I": defaultdict(lambda: [2.14, 0, 0, 0], {
+                "I": [2.67, 0, 0, 0],
     }),
 })
 
@@ -113,6 +132,24 @@ ideal_bond_lengths = defaultdict(
             lambda: [1.82, 0, 0, 0],        # Default S bonds
             {
                 "S": [2.05, 0, 0, 0],          # S-S single bond
+            }
+        ),
+        "Cl": defaultdict(
+            lambda: [1.77, 0, 0, 0],        # Default Cl bonds
+            {
+                "Cl": [1.99, 0, 0, 0],         # Cl-Cl single bond
+            }
+        ),
+        "Br": defaultdict(
+            lambda: [1.94, 0, 0, 0],        # Default Br bonds
+            {
+                "Br": [2.28, 0, 0, 0],         # Br-Br single bond
+            }
+        ),
+        "I": defaultdict(
+            lambda: [2.14, 0, 0, 0],        # Default I bonds
+            {
+                "I": [2.67, 0, 0, 0],          # I-I single bond
             }
         ),
     }
@@ -425,3 +462,19 @@ for atom in possible_geometries:
                 for bo in [1.0, 2.0, 3.0]:
                     if bo not in bond_order:
                         bond_order[bo] = 0
+
+def bond_order_from_float(value):
+    value = float(value)
+    if value == 1.0:
+        return Chem.BondType.SINGLE
+    elif value == 1.5:
+        return Chem.BondType.ONEANDAHALF
+    elif value == 2.0:
+        return Chem.BondType.DOUBLE
+    elif value == 3.0:
+        return Chem.BondType.TRIPLE
+    elif value == 4.0: # PYMOL defines 4 as aromatic
+        return Chem.BondType.ONEANDAHALF
+    else:
+        print(f"Unknown bond order: {value}")
+        return Chem.BondType.UNSPECIFIED
