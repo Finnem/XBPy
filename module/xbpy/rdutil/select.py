@@ -11,6 +11,18 @@ import re
 # Acyclic (non-ring) single bonds between two atoms that are neither terminal nor involved in a triple bond, excluding amide bonds
 RotatableBondSmarts = Chem.MolFromSmarts('[!$(*#*)&!D1;!$(C=O)]-!@[!$(*#*)&!D1;!$(N-C=O)]')
 
+def match_smarts(mol, smarts):
+    pattern = Chem.MolFromSmarts(smarts)
+    ind_map = {}
+    for atom in pattern.GetAtoms():
+        ind_map[atom.GetAtomMapNum()] = atom.GetIdx()
+    matches = mol.GetSubstructMatches(pattern)
+
+    rordered_matches = []
+    for match in matches:
+        rordered_matches.append([match[ind_map[atom_idx + 1]] for atom_idx in range(len(match))])
+    return rordered_matches
+
 def get_amide_bonds(mol):
     submatches = mol.GetSubstructMatches(Chem.MolFromSmarts('[CX3](=O)[NX3H1]'))
     results = []
@@ -268,8 +280,6 @@ def get_full_fragmentation(mol, include_endpoints = False):
             continue
         scaffold_atom_indices = [a.GetIntProp("__orig_idx") for a in scaffold.GetAtoms()]
         substituents_mol = Chem.ReplaceCore(frag_mol, scaffold)
-        from .. import write_molecules
-        write_molecules([scaffold, substituents_mol], "test.sdf")
         substituent_indices = rdmolops.GetMolFrags(substituents_mol)
         substituent_indices = [[substituents_mol.GetAtomWithIdx(a).GetIntProp("__orig_idx") for a in fragment if substituents_mol.GetAtomWithIdx(a).GetSymbol() != "*"] for fragment in substituent_indices]
         substituent_endpoints = [b.GetBeginAtom().GetIntProp("__orig_idx") if (b.GetEndAtom().GetSymbol() == "*") else b.GetEndAtom().GetIntProp("__orig_idx") for b in substituents_mol.GetBonds() if (b.GetBeginAtom().GetSymbol() == "*") or (b.GetEndAtom().GetSymbol() == "*")]

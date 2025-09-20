@@ -49,6 +49,16 @@ def remove_atoms(mol, atoms):
             mol.RemoveAtom(atom_idx)
     return mol.GetMol()
 
+
+def create_query_mol(mol):
+    """
+    Creates a molecule that has no defined bond orders to query as a substructure.
+    """
+    mol = Chem.RWMol(mol)
+    for bond in mol.GetBonds():
+        bond.SetBondType(Chem.BondType.UNSPECIFIED)
+    return mol
+
 def keep_atoms(mol, atoms):
     """Remove all atoms except the given atoms from the molecule.
     

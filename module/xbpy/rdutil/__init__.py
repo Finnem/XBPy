@@ -23,7 +23,9 @@ from .select import get_kinematic_graph
 from .select import get_bond_connected_atoms
 from .select import bond_independent_MCS_matches
 from .select import get_full_fragmentation
+from .select import match_smarts
 from .rw import remove_atoms
+from .rw import create_query_mol
 from .rw import keep_atoms
 from .rw import copy_props
 from .rw import add_explicit_hydrogens

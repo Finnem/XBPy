@@ -200,7 +200,7 @@ def rigid_transform(A, B, sanity_check_tolerance=None):
 
     # Handle reflection case
     if np.linalg.det(R) < 0:
-        logging.warning("det(R) < 0, reflection detected! Correcting...")
+        #logging.warning("det(R) < 0, reflection detected! Correcting...")
         Vt[2, :] *= -1
         R = Vt.T @ U.T
 
