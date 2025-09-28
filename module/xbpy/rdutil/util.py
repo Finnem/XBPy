@@ -48,7 +48,7 @@ bond_lengths = defaultdict(
                 "H" :  [0.8, 0, 0, 0],
                 "C" :  [1.2, 0, 0, 0],
                 "N" :  [1.02, 0, 0, 0],
-                "O" :  [0.96, 0, 0, 0],
+                "O" :  [1.02, 0, 0, 0],
                 "S" :  [1.34, 0, 0, 0],
     }),
     "C" : defaultdict(lambda: [1.54, 1.41, 1.34, 1.2], {
@@ -180,7 +180,10 @@ for atom in next_bond_length:
     else:
         ideal_bond_lengths[atom].update(next_bond_length[atom])
 
-
+def radii(atoms):
+    from rdkit.Chem import PeriodicTable
+    periodic_table = PeriodicTable.GetPeriodicTable()
+    return [periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in atoms]
 
 
 def jump_to_nth_last_line(file_path, n):
@@ -258,12 +261,23 @@ possible_geometries = {
                 "pi_contributing": 1,
                 "ring_requirement": 5,
             },
+            (113, 134): {
+                "bond_orders": [{1.0: 2, 2.0: 1}],
+                "pi_contributing": 1,
+            },
         },
         (4, 0): {
             (109.5,): {
                 "bond_orders": [{1.0: 4}],
-            }
-        }
+            },
+            (107, 108): {
+                "bond_orders": [{1.0: 4}],
+            },
+            (107, 111): {
+                "bond_orders": [{1.0: 4}],
+            },
+        },
+        
     },
     "N": {
         (1, 0): {

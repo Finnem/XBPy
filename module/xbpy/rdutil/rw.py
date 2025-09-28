@@ -318,7 +318,7 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
     # get bond_distances for each pair of atoms
     bond_distances = np.array([bond_lengths[elements[i]][elements[j]] for i, j in zip(d_matrix.row, d_matrix.col)])
     
-    cond = (d_matrix.data < bond_distances[:,0] * 1.05) & (d_matrix.row < d_matrix.col)
+    cond = (d_matrix.data < bond_distances[:,0] * 1.15) & (d_matrix.row < d_matrix.col)
     close_atoms = np.vstack([d_matrix.row[cond], d_matrix.col[cond]]).T
     mol = Chem.RWMol(mol)
     # create a bond for each pair of close atoms

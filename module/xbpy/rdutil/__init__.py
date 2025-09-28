@@ -4,6 +4,7 @@ from .io import write_as_batches
 from .io import write_molecules
 from .io import reduce_to_templates
 from .util import bond_lengths
+from .util import radii
 from .geometry import position
 from .geometry import positions
 from .geometry import transform
