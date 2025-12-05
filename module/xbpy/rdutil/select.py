@@ -127,6 +127,17 @@ def get_connected_atoms(atom, as_indices=False):
     else:
         return [molecule.GetAtomWithIdx(atom_idx) for atom_idx in connected_atom_ids]
 
+def get_connected_component_indices(mol):
+    
+    considered_indices = set(range(mol.GetNumAtoms()))
+    connected_components = []
+    while considered_indices:
+        considered_index = considered_indices.pop()
+        component = get_connected_atoms(mol.GetAtomWithIdx(considered_index), as_indices=True)
+        connected_components.append(component)
+        considered_indices.difference_update(component)
+    return connected_components
+
 def match_rest_groups(mol, query, proximity_bond = True):
     """
     Matches the rest groups in the given Smiles string. Each rest group should have a group RX where X is a number.

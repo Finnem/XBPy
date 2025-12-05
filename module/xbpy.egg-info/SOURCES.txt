@@ -15,8 +15,10 @@ xbpy/interactions/HydrogenBondAcceptor.py
 xbpy/interactions/HydrogenBondDonor.py
 xbpy/interactions/PiPiInteractions.py
 xbpy/interactions/__init__.py
-xbpy/math/__init__.py
-xbpy/math/geometry.py
+xbpy/interactions/strength.py
+xbpy/interactions/test_LJ_approx.py
+xbpy/mathutils/__init__.py
+xbpy/mathutils/geometry.py
 xbpy/morgan/__init__.py
 xbpy/morgan/morgan.py
 xbpy/pymolutil/__init__.py

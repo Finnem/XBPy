@@ -181,8 +181,8 @@ for atom in next_bond_length:
         ideal_bond_lengths[atom].update(next_bond_length[atom])
 
 def radii(atoms):
-    from rdkit.Chem import PeriodicTable
-    periodic_table = PeriodicTable.GetPeriodicTable()
+    from rdkit import Chem
+    periodic_table = Chem.GetPeriodicTable()
     return [periodic_table.GetRvdw(atom.GetAtomicNum()) for atom in atoms]
 
 

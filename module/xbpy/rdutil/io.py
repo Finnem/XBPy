@@ -153,7 +153,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     elif os.path.splitext(path)[1] == ".mol":
         molecules = [Chem.rdmolfiles.MolFromMolFile(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".sdf":
-        molecules = Chem.rdmolfiles.SDMolSupplier(path, *args, **kwargs)
+        molecules = Chem.rdmolfiles.SDMolSupplier(path, strictParsing= False, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".mae":
         molecules = Chem.rdmolfiles.MaeMolSupplier(path, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".maegz":
@@ -315,7 +315,7 @@ def read_coord_file(path, reference_molecule = None, proximityBonding = True, to
     Returns:
         RDKit.Mol: List of RDKit molecules.
     """
-    from .geometry import proximity_bond
+    from .rw import proximity_bond
     from rdkit.Chem import rdmolops
 
 

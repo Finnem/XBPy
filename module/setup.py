@@ -6,5 +6,5 @@ setup(name='xbpy',
         author='Finn Mier',
         license='MIT',
         dependencies=['numpy', 'rdkit', 'scipy', 'seaborn', 'tqdm'],
-        packages=['xbpy.rdutil', 'xbpy.dispatch', 'xbpy.math', 'xbpy.morgan', 'xbpy.interactions', 'xbpy.pymolutil', 'xbpy'],
+        packages=['xbpy.rdutil', 'xbpy.dispatch', 'xbpy.mathutils', 'xbpy.morgan', 'xbpy.interactions', 'xbpy.pymolutil', 'xbpy'],
         zip_safe=False)

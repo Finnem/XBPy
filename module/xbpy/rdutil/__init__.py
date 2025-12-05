@@ -2,6 +2,7 @@ from .io import read_molecules
 from .io import get_num_molecules
 from .io import write_as_batches
 from .io import write_molecules
+from .io import read_coord_file
 from .io import reduce_to_templates
 from .util import bond_lengths
 from .util import radii
@@ -25,6 +26,7 @@ from .select import get_bond_connected_atoms
 from .select import bond_independent_MCS_matches
 from .select import get_full_fragmentation
 from .select import match_smarts
+from .select import get_connected_component_indices
 from .rw import remove_atoms
 from .rw import create_query_mol
 from .rw import keep_atoms

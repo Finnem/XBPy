@@ -5,7 +5,7 @@ from rdkit.Chem import AllChem
 import logging
 from rdkit.Geometry import Point3D
 from rdkit import Chem
-from ..math.geometry import calculate_angle, align_directions, rigid_transform
+from ..mathutils.geometry import calculate_angle, align_directions, rigid_transform
 from .geometry import position 
 from itertools import combinations, chain
 from rdkit.Chem import rdmolops
@@ -86,7 +86,7 @@ def add_explicit_hydrogens(mol):
     """
     from rdkit import Chem
     from .geometry import position
-    from ..math.geometry import rigid_transform, apply_transform
+    from ..mathutils.geometry import rigid_transform, apply_transform
     from rdkit.Chem.rdmolops import RemoveHs
 
     mol = RemoveHs(mol, implicitOnly=True)

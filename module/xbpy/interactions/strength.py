@@ -105,3 +105,106 @@ def lj_impact_pair(sym1: str, sym2: str, distance_angstrom: float) -> float:
     sigma_ab = 0.5 * (sigma1 + sigma2)
     x = sigma_ab / distance_angstrom
     return A * (x ** n) + B * (x ** m)
+
+def lj_potential(symbol: str, distance_angstrom: float, epsilon: float = 1.0) -> float:
+    """
+    Actual Lennard-Jones potential for a single-element pair (X–X),
+    using σ from UFF (Å). Returns the potential value (can be negative).
+    
+    Formula: V_LJ(r) = 4ε[(σ/r)^12 - (σ/r)^6]
+    
+    Parameters:
+    -----------
+    symbol : str
+        Element symbol
+    distance_angstrom : float
+        Distance in Angstroms
+    epsilon : float, default=1.0
+        Well depth parameter (energy units)
+    
+    Returns:
+    --------
+    float
+        LJ potential value (same units as epsilon)
+    """
+    sigma = get_sigma_from_uff(symbol)
+    x = sigma / distance_angstrom
+    return 4 * epsilon * ((x ** 12) - (x ** 6))
+
+def lj_potential_pair(sym1: str, sym2: str, distance_angstrom: float, epsilon: float = 1.0) -> float:
+    """
+    Actual Lennard-Jones potential for a mixed pair (A–B),
+    using Lorentz mixing for σ: σ_AB = (σ_A + σ_B)/2.
+    Returns the potential value (can be negative).
+    
+    Formula: V_LJ(r) = 4ε[(σ_AB/r)^12 - (σ_AB/r)^6]
+    
+    Parameters:
+    -----------
+    sym1 : str
+        First element symbol
+    sym2 : str
+        Second element symbol
+    distance_angstrom : float
+        Distance in Angstroms
+    epsilon : float, default=1.0
+        Well depth parameter (energy units)
+    
+    Returns:
+    --------
+    float
+        LJ potential value (same units as epsilon)
+    """
+    sigma1 = get_sigma_from_uff(sym1)
+    sigma2 = get_sigma_from_uff(sym2)
+    sigma_ab = 0.5 * (sigma1 + sigma2)
+    x = sigma_ab / distance_angstrom
+    return 4 * epsilon * ((x ** 12) - (x ** 6))
+
+def lj_potential_abs(symbol: str, distance_angstrom: float, epsilon: float = 1.0) -> float:
+    """
+    Absolute value of the Lennard-Jones potential for a single-element pair (X–X),
+    using σ from UFF (Å).
+    
+    Formula: |V_LJ(r)| = |4ε[(σ/r)^12 - (σ/r)^6]|
+    
+    Parameters:
+    -----------
+    symbol : str
+        Element symbol
+    distance_angstrom : float
+        Distance in Angstroms
+    epsilon : float, default=1.0
+        Well depth parameter (energy units)
+    
+    Returns:
+    --------
+    float
+        Absolute value of LJ potential (same units as epsilon)
+    """
+    return abs(lj_potential(symbol, distance_angstrom, epsilon))
+
+def lj_potential_abs_pair(sym1: str, sym2: str, distance_angstrom: float, epsilon: float = 1.0) -> float:
+    """
+    Absolute value of the Lennard-Jones potential for a mixed pair (A–B),
+    using Lorentz mixing for σ: σ_AB = (σ_A + σ_B)/2.
+    
+    Formula: |V_LJ(r)| = |4ε[(σ_AB/r)^12 - (σ_AB/r)^6]|
+    
+    Parameters:
+    -----------
+    sym1 : str
+        First element symbol
+    sym2 : str
+        Second element symbol
+    distance_angstrom : float
+        Distance in Angstroms
+    epsilon : float, default=1.0
+        Well depth parameter (energy units)
+    
+    Returns:
+    --------
+    float
+        Absolute value of LJ potential (same units as epsilon)
+    """
+    return abs(lj_potential_pair(sym1, sym2, distance_angstrom, epsilon))

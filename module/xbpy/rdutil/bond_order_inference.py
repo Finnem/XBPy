@@ -1,5 +1,5 @@
 
-from ..math.geometry import calculate_angle
+from ..mathutils.geometry import calculate_angle
 from itertools import combinations
 from .geometry import position
 from .util import possible_geometries, ideal_bond_lengths

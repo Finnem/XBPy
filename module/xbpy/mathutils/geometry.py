@@ -241,8 +241,23 @@ def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_rad
         pairwise_distances  = np.linalg.norm(new_points[:, None, :] - atom_coordinates[None, atom_mask, :], axis=-1)
         new_points = new_points[np.all(pairwise_distances > atom_radii[atom_mask] + distance_radius, axis=1)]
         points.append(new_points)
-        direction = atom_coordinate - new_points; direction /= np.linalg.norm(direction, axis=1)[:, None]
-        directions.append(direction)
+        
+        # Only compute directions if we have points
+        if len(new_points) > 0:
+            # Calculate outward-pointing normals: from atom center to surface points
+            direction = new_points - atom_coordinate
+            direction_norms = np.linalg.norm(direction, axis=1)
+            # Avoid division by zero by only normalizing non-zero vectors
+            valid_directions = direction_norms > 1e-10
+            if np.any(valid_directions):
+                direction[valid_directions] /= direction_norms[valid_directions, None]
+                directions.append(direction)
+            else:
+                # If no valid directions, create empty array with correct shape
+                directions.append(np.empty((0, 3)))
+        else:
+            # If no points, create empty array with correct shape
+            directions.append(np.empty((0, 3)))
     points = np.concatenate(points, axis=0)
     single_directions = np.concatenate(directions, axis=0)
     kdtree = cKDTree(atom_coordinates)
@@ -253,14 +268,34 @@ def sample_solvent_accessible_surface(atom_coordinates, atom_radii, distance_rad
         #print(neighbors)
         directions = []
         for i, neighbor in enumerate(neighbors):
-            differences = atom_coordinates[neighbor] - points[i]
+            if len(neighbor) == 0:
+                # If no neighbors, use the original direction
+                directions.append(single_directions[i])
+                continue
+                
+            # Calculate outward-pointing directions from atom centers to surface point
+            differences = points[i] - atom_coordinates[neighbor]
             distances = np.linalg.norm(differences, axis=1)
-            weights = np.exp(-distances / smooth_distance) + 1
+            
+            # Only consider non-zero distances
+            valid_distances = distances > 1e-10
+            if not np.any(valid_distances):
+                # If all distances are zero, use the original direction
+                directions.append(single_directions[i])
+                continue
+                
+            weights = np.exp(-distances[valid_distances] / smooth_distance) + 1
             weights /= np.sum(weights)
-            neighbor_directions = differences; neighbor_directions /= np.linalg.norm(neighbor_directions, axis=1)[:, None]
+            neighbor_directions = differences[valid_distances]
+            neighbor_directions /= distances[valid_distances, None]
             directions.append(np.sum(weights[:, None] * neighbor_directions, axis=0))
         directions = np.array(directions)
-        directions /= np.linalg.norm(directions, axis=1)[:, None]
+        
+        # Normalize directions, avoiding division by zero
+        direction_norms = np.linalg.norm(directions, axis=1)
+        valid_directions = direction_norms > 1e-10
+        if np.any(valid_directions):
+            directions[valid_directions] /= direction_norms[valid_directions, None]
     else:
         directions = single_directions
 
