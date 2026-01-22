@@ -97,18 +97,20 @@ def select_atom(possible_atoms, neighborhood = None, element = None, return_firs
             atoms.append(atom) 
     return atoms
 
-def get_connected_atoms(atom, as_indices=False):
+def get_connected_atoms(atom, as_indices=False, split_on = None):
     """Return a list of atoms part of the connected component of the given atom.
 
     Args:
         atom (RDKit.Atom): Atom to get the connected atoms from.
         as_indices (bool): Defaults to False. If True, return the indices of the atoms instead of the atoms themselves.
+        split_on list((start_idx, end_idx)): Defaults to None. If provided, the connected component will be split at the given atom indices.
 
     Returns:
         list(RDKit.Atom): List of atoms part of the connected component of the given atom.
 
     """
-
+    if split_on is None:
+        split_on = []
     molecule = atom.GetOwningMol()
     # we keep a list and a set to keep track of the order of when we saw the atoms but have fast lookup
     connected_atom_ids = [atom.GetIdx()]
@@ -118,7 +120,7 @@ def get_connected_atoms(atom, as_indices=False):
         atom_idx = to_check.pop(0)
         for neighbor in molecule.GetAtomWithIdx(atom_idx).GetNeighbors():
             neighbor_idx = neighbor.GetIdx()
-            if neighbor_idx not in seen:
+            if (neighbor_idx not in seen) and (((atom_idx, neighbor_idx) not in split_on) and ((neighbor_idx, atom_idx) not in split_on)):
                 seen.add(neighbor_idx)
                 to_check.append(neighbor_idx)
                 connected_atom_ids.append(neighbor_idx)
@@ -127,13 +129,13 @@ def get_connected_atoms(atom, as_indices=False):
     else:
         return [molecule.GetAtomWithIdx(atom_idx) for atom_idx in connected_atom_ids]
 
-def get_connected_component_indices(mol):
+def get_connected_component_indices(mol, split_on = None):
     
     considered_indices = set(range(mol.GetNumAtoms()))
     connected_components = []
     while considered_indices:
         considered_index = considered_indices.pop()
-        component = get_connected_atoms(mol.GetAtomWithIdx(considered_index), as_indices=True)
+        component = get_connected_atoms(mol.GetAtomWithIdx(considered_index), as_indices=True, split_on=split_on)
         connected_components.append(component)
         considered_indices.difference_update(component)
     return connected_components

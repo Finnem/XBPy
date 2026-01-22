@@ -480,9 +480,16 @@ def _construct_SMT_formulation(mol, indices, all_pairwise_bond_angles, all_bond_
                         else:
                             # we weight based on the angle deviation
                             weighted_deviation = used_deviation * angle_deviation_weighting
-                            RealVal(weighted_deviation)
-                            total_penalty_expression = Sum([(RealVal(weighted_deviation) * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(1, 4)])
-                            penalty_expressions.append(Sum([(RealVal(weighted_deviation) * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(0, 4)]))
+                            # Check if weighted_deviation is a valid finite number (not NaN or infinity)
+                            if not np.isfinite(weighted_deviation):
+                                # Skip penalty if invalid, treat as forbidden angle instead
+                                forbidden_angle_constraints.append(Or(
+                                    bond_order_variables[(atom.GetIdx(), neighbor1, 0)] == 1,
+                                    bond_order_variables[(atom.GetIdx(), neighbor2, 0)] == 1
+                                ))
+                            else:
+                                total_penalty_expression = Sum([(RealVal(weighted_deviation) * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(1, 4)])
+                                penalty_expressions.append(Sum([(RealVal(weighted_deviation) * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(0, 4)]))
 
                 # bond order/charge/angle implications, guarded/relaxed
                 center_idx = atom.GetIdx()

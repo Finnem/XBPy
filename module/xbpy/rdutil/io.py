@@ -37,7 +37,7 @@ def determine_molecule_paths(paths, recursive = True):
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
     return molecule_paths
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=True, reset_index = False, as_property_mol = False, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=True, reset_index = False, as_property_mol = False, duplicate_check = True, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
@@ -51,6 +51,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
         proximityBonding (bool): Defaults to True. If True, infer bonds from the xyz block. If False, use the reference molecule as a template.
         reset_index (bool): Defaults to False. If True, reset the atom indices of the molecule.
         as_property_mol (bool): Defaults to False. If True, return the molecule as a property molecule. Necessary to keep properties when pickling etc.
+        duplicate_check (bool): Defaults to True. If True, check for duplicate positions in the molecule.
         *args: Additional arguments to pass to the RDKit reader.
         **kwargs: Additional keyword arguments to pass to the RDKit reader.
 
@@ -70,13 +71,16 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
     # Loop over all paths, seperated from tree walk to allow for error detection (emtpy paths)
     molecule_paths = determine_molecule_paths(paths, recursive=recursive)
     for path in sorted(molecule_paths):
-        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, as_property_mol=as_property_mol, *args, **kwargs)
+        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, as_property_mol=as_property_mol, duplicate_check=duplicate_check, *args, **kwargs)
         for mol in path_molecules:
             if reset_index:
                 from ..morgan import unique_index
                 new_indices = unique_index(mol)
                 ordering = np.argsort(new_indices)
                 mol = RenumberAtoms(mol, [int(i) for i in ordering])
+            if duplicate_check:
+                if duplicate_position_check(mol):
+                    logging.warning(f"Duplicate positions found in molecule {path}.")
             yield PropertyMol(mol) if as_property_mol else mol
 
 
@@ -128,7 +132,7 @@ def _get_num_mols(path, *args, **kwargs):
 
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, duplicate_check = True, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -159,7 +163,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     elif os.path.splitext(path)[1] == ".maegz":
         molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
-        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, *args, **kwargs)
+        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, duplicate_check=duplicate_check, *args, **kwargs)
     else:
         try:
             molecules = read_coord_file(path, reference_molecule, proximityBonding=proximityBonding, *args, **kwargs)
@@ -201,7 +205,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     return molecules
 
 
-def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, *args, **kwargs):
+def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, duplicate_check = True, *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -215,9 +219,15 @@ def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True,
 
     import os
     import rdkit.Chem as Chem
+    from .rw import remove_atoms
 
     if os.path.splitext(path)[1] == ".xyz":
         mol = Chem.rdmolfiles.MolFromXYZFile(path)
+        if duplicate_check:
+            duplicate_indices = get_duplicate_positions(mol)
+            if len(duplicate_indices) > 0:
+                logging.warning(f"Duplicate positions found in molecule {path}. Deleting {len(duplicate_indices)} atoms.")
+                mol = remove_atoms(mol, [int(i) for i in duplicate_indices])
         # we infer the bonds if requested
         if proximityBonding:
             mol = proximity_bond(mol, as_property_mol=as_property_mol)
@@ -501,3 +511,46 @@ def _resolve_path(mol, index, cur_path, require_separation = False):
 
 def write_as_batches(molecules, batch_size, type = "xyz"):
     ...
+
+def duplicate_position_check(molecule, eliminate = False):
+    """Check if the molecule has duplicate positions.
+    """
+    from .geometry import position
+    positions = position(molecule)
+    if np.unique(positions, axis=0).shape[0] != positions.shape[0]:
+        return True
+    else:
+        return False
+
+def get_duplicate_positions(molecule):
+    """Get the duplicate positions from the molecule.
+    
+    Returns:
+        np.ndarray: Indices of atoms that should be deleted to remove duplicates.
+                    For each set of duplicate positions, keeps the first occurrence
+                    and returns indices of the remaining duplicates.
+    """
+    from .geometry import position
+    positions = position(molecule)
+    
+    # For large arrays, use lexsort which is more memory efficient than unique with axis=0
+    n_atoms = positions.shape[0]
+    
+    # Use lexsort to sort by x, then y, then z coordinates
+    # This groups identical positions together
+    sorted_indices = np.lexsort(positions.T[::-1])  # Reverse for z, y, x order
+    sorted_positions = positions[sorted_indices]
+    
+    # Find where consecutive positions differ (using diff along axis=0)
+    # This identifies boundaries between unique position groups
+    diff = np.diff(sorted_positions, axis=0)
+    # Positions are duplicates if all three coordinates are the same (diff == 0)
+    is_same = np.all(diff == 0, axis=1)
+    
+    # For each group of duplicates, keep the first one and mark the rest for deletion
+    # is_same[i] is True if sorted_positions[i] == sorted_positions[i+1]
+    # So we want to mark sorted_indices[i+1] for deletion when is_same[i] is True
+    # This keeps the first occurrence of each duplicate group
+    indices_to_delete = sorted_indices[1:][is_same]
+    
+    return indices_to_delete
