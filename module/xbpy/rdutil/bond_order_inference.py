@@ -1,6 +1,7 @@
 
 from ..mathutils.geometry import calculate_angle
 from itertools import combinations, count
+from fractions import Fraction
 from .geometry import position
 from .util import possible_geometries, ideal_bond_lengths
 import numpy as np
@@ -20,7 +21,14 @@ _MP_ALL_BOND_INDICES = None
 _MP_ALL_BOND_LENGTHS = None
 _MP_CSR_ADJ_MATRIX = None
 _MP_LOG_SUBGRAPHS = False
-_MIN_SUBGRAPH_SIZE = 25
+_MIN_SUBGRAPH_SIZE = 40
+_SMT_PENALTY_SCALE = int(os.environ.get("XB_Z3_PENALTY_SCALE", "10000"))
+
+
+def _scaled_penalty(value, scale=_SMT_PENALTY_SCALE):
+    if isinstance(value, (int, np.integer)):
+        return int(value) * scale
+    return int(Fraction(str(value)).limit_denominator() * scale)
 
 
 def _progress_add_total(progress, delta=1):
@@ -127,6 +135,25 @@ def _solve_subgraph_worker(subgraph):
     )
 
 
+def _solve_subgraph_any_worker(subgraph):
+    subgraph, free_bond_pairs, subgraph_id, parent_id = subgraph
+    return _solve_subgraph(
+        _MP_MOL,
+        subgraph,
+        _MP_ALL_PAIRWISE_BOND_ANGLES,
+        _MP_ALL_BOND_INDICES,
+        _MP_ALL_BOND_LENGTHS,
+        _MP_CSR_ADJ_MATRIX,
+        log_subgraph=_MP_LOG_SUBGRAPHS,
+        free_bond_pairs=free_bond_pairs,
+        pool=None,
+        subgraph_id=subgraph_id,
+        parent_id=parent_id,
+        id_counter=None,
+        progress=None,
+    )
+
+
 def _solve_subgraph(
     mol,
     subgraph,
@@ -161,6 +188,7 @@ def _solve_subgraph(
         return result
 
     if len(subgraph) > _MIN_SUBGRAPH_SIZE:
+        parallel_splits = os.environ.get("XB_Z3_PARALLEL_SPLITS", "1") == "1"
         for bond_key, comp_a, comp_b in _iter_cc_bridge_splits(subgraph, mol, csr_adj_matrix):
             if log_subgraph:
                 logger.debug("Solving bridge split with bond key %s", bond_key)
@@ -168,36 +196,52 @@ def _solve_subgraph(
                 child_counter = id_counter or count()
                 child_a_id = next(child_counter)
                 child_b_id = next(child_counter)
-                result_a = _solve_subgraph(
-                    mol,
-                    comp_a,
-                    all_pairwise_bond_angles,
-                    all_bond_indices,
-                    all_bond_lengths,
-                    csr_adj_matrix,
-                    log_subgraph,
-                    free_bond_pairs=free_bond_pairs | {bond_key},
-                    pool=pool,
-                    subgraph_id=child_a_id,
-                    parent_id=subgraph_id,
-                    id_counter=child_counter,
-                    progress=progress,
-                )
-                result_b = _solve_subgraph(
-                    mol,
-                    comp_b,
-                    all_pairwise_bond_angles,
-                    all_bond_indices,
-                    all_bond_lengths,
-                    csr_adj_matrix,
-                    log_subgraph,
-                    free_bond_pairs=free_bond_pairs | {bond_key},
-                    pool=pool,
-                    subgraph_id=child_b_id,
-                    parent_id=subgraph_id,
-                    id_counter=child_counter,
-                    progress=progress,
-                )
+                if pool is not None and parallel_splits:
+                    child_est_a = 1
+                    child_est_b = 1
+                    if progress is not None and getattr(progress, "_xb_total_mode", None) == "estimated":
+                        child_est_a = _estimate_subgraph_leaf_count(comp_a, mol, csr_adj_matrix)
+                        child_est_b = _estimate_subgraph_leaf_count(comp_b, mol, csr_adj_matrix)
+                    _progress_add_total(progress, child_est_a + child_est_b)
+                    args_a = (comp_a, frozenset(free_bond_pairs | {bond_key}), child_a_id, subgraph_id)
+                    args_b = (comp_b, frozenset(free_bond_pairs | {bond_key}), child_b_id, subgraph_id)
+                    async_a = pool.apply_async(_solve_subgraph_any_worker, (args_a,))
+                    async_b = pool.apply_async(_solve_subgraph_any_worker, (args_b,))
+                    result_a = async_a.get()
+                    _progress_update(progress, child_est_a)
+                    result_b = async_b.get()
+                    _progress_update(progress, child_est_b)
+                else:
+                    result_a = _solve_subgraph(
+                        mol,
+                        comp_a,
+                        all_pairwise_bond_angles,
+                        all_bond_indices,
+                        all_bond_lengths,
+                        csr_adj_matrix,
+                        log_subgraph,
+                        free_bond_pairs=free_bond_pairs | {bond_key},
+                        pool=pool,
+                        subgraph_id=child_a_id,
+                        parent_id=subgraph_id,
+                        id_counter=child_counter,
+                        progress=progress,
+                    )
+                    result_b = _solve_subgraph(
+                        mol,
+                        comp_b,
+                        all_pairwise_bond_angles,
+                        all_bond_indices,
+                        all_bond_lengths,
+                        csr_adj_matrix,
+                        log_subgraph,
+                        free_bond_pairs=free_bond_pairs | {bond_key},
+                        pool=pool,
+                        subgraph_id=child_b_id,
+                        parent_id=subgraph_id,
+                        id_counter=child_counter,
+                        progress=progress,
+                    )
             except ValueError:
                 continue
 
@@ -335,15 +379,16 @@ def adj_matrix_from_bond_indices(bond_indices, num_atoms):
     all_cols = np.concatenate([cols, rows])
     return coo_matrix((data, (all_rows, all_cols)), shape=(num_atoms, num_atoms)).tocsr()
 
-def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = False, bond_indices = None):
+def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = "auto", bond_indices = None):
     try:
         from z3 import Optimize, sat, Solver, IntVal
     except ImportError:
         raise ImportError("The z3 package is required for this function. Try to install via 'sudo apt install z3' and 'pip install z3-solver'.")
 
     num_bonds = mol.GetNumBonds()
+    verbose_mode = False if verbose == "auto" else bool(verbose)
 
-    if verbose: logger.info(f"Fetching approximate bond lengths for {mol.GetNumBonds()} bonds")
+    if verbose_mode: logger.info(f"Fetching approximate bond lengths for {mol.GetNumBonds()} bonds")
     if bond_indices is None:
         adj_matrix = rdmolops.GetAdjacencyMatrix(mol)
         bond_indices = np.argwhere(adj_matrix == 1)
@@ -356,12 +401,23 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
     positions = position(mol)
     bond_positions = positions[all_bond_indices]
     bond_lengths = np.linalg.norm(bond_positions[:, 0] - bond_positions[:, 1], axis=1)
-    if verbose: logger.info(f"Fetching approximate bond angles for {mol.GetNumBonds()} bonds")
+    if verbose_mode: logger.info(f"Fetching approximate bond angles for {mol.GetNumBonds()} bonds")
     all_pairwise_bond_angles = _get_all_pairwise_bond_angles(mol)
 
-    if verbose: logger.info("Fetching violating atoms")
+    if verbose_mode:
+        logger.info("Fetching violating atoms")
     violating_atom_indices = _get_violating_atom_clusters(mol, all_pairwise_bond_angles, add_hydrogens = add_hydrogens)
-    if verbose: logger.info(f"Found {len(violating_atom_indices)} violating atoms: {_get_atom_statistics(violating_atom_indices, mol)}")
+    if verbose == "auto":
+        verbose_mode = (
+            mol.GetNumAtoms() > 300 or len(violating_atom_indices) > 300
+        )
+        if verbose_mode:
+            logger.info(
+                "Auto-verbose enabled for bond order inference (atoms=%s, violating=%s)",
+                mol.GetNumAtoms(),
+                len(violating_atom_indices),
+            )
+    if verbose_mode: logger.info(f"Found {len(violating_atom_indices)} violating atoms: {_get_atom_statistics(violating_atom_indices, mol)}")
     if len(violating_atom_indices) == 0:
         return mol
     # Expand the set by one-hop neighbors so substructures include bonded context (incl. hydrogens)
@@ -369,17 +425,17 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
     for idx in list(violating_atom_indices):
         for nbr in mol.GetAtomWithIdx(idx).GetNeighbors():
             expanded_atom_indices.add(nbr.GetIdx())
-    if verbose: logger.info(f"Determining connected subgraphs for {len(expanded_atom_indices)} atoms")
+    if verbose_mode: logger.info(f"Determining connected subgraphs for {len(expanded_atom_indices)} atoms")
     connected_subgraphs = _get_connected_subgraphs(csr_adj_matrix, expanded_atom_indices)
-    if verbose: logger.info(f"Found {len(connected_subgraphs)} connected subgraphs")
+    if verbose_mode: logger.info(f"Found {len(connected_subgraphs)} connected subgraphs")
     subgraph_id_counter = count()
     subgraph_entries = [
         (subgraph, next(subgraph_id_counter), None) for subgraph in connected_subgraphs
     ]
     new_mol = Chem.RWMol(mol)
     try:
-        if verbose: logger.info("Solving subgraphs...")
-        if verbose:
+        if verbose_mode: logger.info("Solving subgraphs...")
+        if verbose_mode:
             try:
                 from tqdm import tqdm as _tqdm
             except ImportError:
@@ -389,11 +445,11 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
         use_parallel = len(connected_subgraphs) > 1
         processes = _get_parallel_processes()
         if use_parallel and processes > 1:
-            if verbose: logger.info("Using parallel processing with %s processes for SAT solving", processes)
+            if verbose_mode: logger.info("Using parallel processing with %s processes for SAT solving", processes)
             try:
                 log_queue = None
                 log_listener = None
-                if verbose:
+                if verbose_mode:
                     log_queue, log_listener = _start_log_listener()
                 ctx = _mp.get_context("fork")
                 with ctx.Pool(
@@ -433,7 +489,7 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
                                     all_bond_indices,
                                     bond_lengths,
                                     csr_adj_matrix,
-                                    verbose,
+                                    verbose_mode,
                                     free_bond_pairs=set(),
                                     pool=pool,
                                     subgraph_id=subgraph_id,
@@ -469,14 +525,14 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
                     )
                     progress._xb_total_mode = "estimated"
                 results = [
-                    _solve_subgraph(
+                                _solve_subgraph(
                         mol,
                         subgraph,
                         all_pairwise_bond_angles,
                         all_bond_indices,
                         bond_lengths,
                         csr_adj_matrix,
-                        verbose,
+                                    verbose_mode,
                         subgraph_id=subgraph_id,
                         parent_id=parent_id,
                         id_counter=subgraph_id_counter,
@@ -512,7 +568,7 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
                     all_bond_indices,
                     bond_lengths,
                     csr_adj_matrix,
-                    verbose,
+                    verbose_mode,
                     subgraph_id=subgraph_id,
                     parent_id=parent_id,
                     id_counter=subgraph_id_counter,
@@ -522,9 +578,9 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
             ]
             if progress:
                 progress.close()
-        if verbose:
-            logging.info(f"Solved {len(results)} subgraphs")
-            logging.info(f"Assigning bond orders and charges to the molecule:")
+            if verbose_mode:
+                logging.info(f"Solved {len(results)} subgraphs")
+                logging.info(f"Assigning bond orders and charges to the molecule:")
             
         for subgraph, softened_atoms, new_bond_orders, assigned_charges in results:
             # Print only assignments relevant to softened atoms (only if any softened)
@@ -717,12 +773,12 @@ def _construct_SMT_formulation(
     free_bond_pairs=None,
 ):
     try:
-        from z3 import Or, And, Int, RealVal, Sum, Solver, Implies, IntVal, Bool, BoolVal
+        from z3 import Or, And, Int, Sum, Solver, Implies, IntVal, Bool, BoolVal
     except ImportError:
         raise ImportError("The z3 package is required for this function. Try to install via 'sudo apt install z3' and 'pip install z3-solver'.")
 
     considered_atoms = [mol.GetAtomWithIdx(idx) for idx in indices]
-    penalty_expressions = [RealVal(0)]
+    penalty_expressions = [IntVal(0)]
 
     bond_length_lookup = {}
     for (idx1, idx2), length in zip(bond_indices, bond_lengths):
@@ -808,9 +864,9 @@ def _construct_SMT_formulation(
                         if bond_length is None:
                             continue
                         ideal_bond_length = ideal_bond_lengths[atom.GetSymbol()][neighbor.GetSymbol()][ideal_bond_length_order_indices[bond_order]]
-                        penalty_expressions.append((ideal_bond_length - bond_length) * symbol)
+                        penalty_expressions.append(_scaled_penalty(ideal_bond_length - bond_length) * symbol)
                     else:
-                        penalty_expressions.append(10 * symbol)
+                        penalty_expressions.append(_scaled_penalty(10) * symbol)
 
                 # bond order exclusivity
                 atom1_excluded = atom1_idx in excluded_atoms
@@ -851,9 +907,9 @@ def _construct_SMT_formulation(
                         if bond_length is None:
                             continue
                         ideal_bond_length = ideal_bond_lengths[atom.GetSymbol()][neighbor.GetSymbol()][ideal_bond_length_order_indices[bond_order]]
-                        penalty_expressions.append((ideal_bond_length - bond_length) * symbol)
+                        penalty_expressions.append(_scaled_penalty(ideal_bond_length - bond_length) * symbol)
                     else:
-                        penalty_expressions.append(10 * symbol)
+                        penalty_expressions.append(_scaled_penalty(10) * symbol)
 
                 base_constraint = Sum([bond_order_variables[(atom1_idx, atom2_idx, bond_order)] for bond_order in range(4)]) == 1
                 activation_cond = _activation_condition(atom1_idx, atom2_idx)
@@ -905,7 +961,7 @@ def _construct_SMT_formulation(
                     c_bool_name = f"bool_charge_{aidx}_{possible_charge}"
             charge_is_bool.append(c_bool)
             named_constraints[c_bool_name] = c_bool
-            penalty_expressions.append(np.abs(possible_charge) * symbol)
+            penalty_expressions.append(_scaled_penalty(np.abs(possible_charge)) * symbol)
         # charge exclusivity
         atom_idx = atom.GetIdx()
         
@@ -979,8 +1035,9 @@ def _construct_SMT_formulation(
                                     bond_order_variables[(atom.GetIdx(), neighbor2, 0)] == 1
                                 ))
                             else:
-                                total_penalty_expression = Sum([(RealVal(weighted_deviation) * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(1, 4)])
-                                penalty_expressions.append(Sum([(RealVal(weighted_deviation) * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(0, 4)]))
+                                scaled_deviation = _scaled_penalty(weighted_deviation)
+                                total_penalty_expression = Sum([(scaled_deviation * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(1, 4)])
+                                penalty_expressions.append(Sum([(scaled_deviation * bond_order_variables[(atom.GetIdx(), neighbor1, i)]) for i in range(0, 4)]))
 
                 # bond order/charge/angle implications, guarded/relaxed
                 center_idx = atom.GetIdx()

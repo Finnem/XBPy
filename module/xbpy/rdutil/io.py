@@ -37,7 +37,7 @@ def determine_molecule_paths(paths, recursive = True):
             logging.warning("No molecules found at path(s) {}. Make sure the file(s) exists.".format(path))
     return molecule_paths
 
-def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=True, reset_index = False, as_property_mol = False, duplicate_check = True, *args, **kwargs):
+def read_molecules(path, recursive = True, store_path = False, reference_molecule = None, removeHs=False, sanitize=False, proximityBonding=True, reset_index = False, as_property_mol = False, duplicate_check = True, verbose="auto", *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file, or from a directory /multiple directories of such files.
         Coordinates from an xyz file are converted to a RDKit molecule using the reference molecule as a template.
     
@@ -52,6 +52,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
         reset_index (bool): Defaults to False. If True, reset the atom indices of the molecule.
         as_property_mol (bool): Defaults to False. If True, return the molecule as a property molecule. Necessary to keep properties when pickling etc.
         duplicate_check (bool): Defaults to True. If True, check for duplicate positions in the molecule.
+        verbose (bool or "auto"): Defaults to "auto". If "auto", verbosity is enabled for large/complex bond inference.
         *args: Additional arguments to pass to the RDKit reader.
         **kwargs: Additional keyword arguments to pass to the RDKit reader.
 
@@ -71,7 +72,7 @@ def read_molecules(path, recursive = True, store_path = False, reference_molecul
     # Loop over all paths, seperated from tree walk to allow for error detection (emtpy paths)
     molecule_paths = determine_molecule_paths(paths, recursive=recursive)
     for path in sorted(molecule_paths):
-        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, as_property_mol=as_property_mol, duplicate_check=duplicate_check, *args, **kwargs)
+        path_molecules = _read_molecules_file(path, store_path, reference_molecule, removeHs=removeHs, sanitize=sanitize, proximityBonding=proximityBonding, as_property_mol=as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
         for mol in path_molecules:
             if reset_index:
                 from ..morgan import unique_index
@@ -132,7 +133,7 @@ def _get_num_mols(path, *args, **kwargs):
 
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, duplicate_check = True, verbose = False, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, duplicate_check = True, verbose = "auto", *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -205,7 +206,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     return molecules
 
 
-def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, duplicate_check = True, verbose = False, *args, **kwargs):
+def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, duplicate_check = True, verbose = "auto", *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -308,7 +309,7 @@ def reduce_to_templates(mol, reference_molecules, copy_bond_order = True):
 
 
 
-def read_coord_file(path, reference_molecule = None, proximityBonding = True, to_angstrom = True, *args, **kwargs):
+def read_coord_file(path, reference_molecule = None, proximityBonding = True, to_angstrom = True, verbose = "auto", *args, **kwargs):
 
     """
     Method to read molecules from a turbomole coord file. User-defined bonds are not supported.
@@ -319,6 +320,7 @@ def read_coord_file(path, reference_molecule = None, proximityBonding = True, to
         reference_molecule (RDKit.Mol): Reference molecule to use as a template.
         proximityBonding (bool): Defaults to False. If True, infer bonds from the xyz block. If False, use the reference molecule as a template.
         to_angstrom (bool): Defaults to True. If True, the coordinates are in bohr units and will be converted to angstrom.
+        verbose (bool or "auto"): Defaults to "auto". If "auto", verbosity is enabled for large/complex bond inference.
         *args: Additional arguments to pass to the RDKit reader.
         **kwargs: Additional keyword arguments to pass to the RDKit reader.
 
@@ -363,7 +365,7 @@ def read_coord_file(path, reference_molecule = None, proximityBonding = True, to
 
     # and we infer the bonds if requested
     if proximityBonding:
-        mol = proximity_bond(mol)
+        mol = proximity_bond(mol, verbose=verbose)
         rdmolops.RemoveHs(mol, implicitOnly=False, updateExplicitCount=False, sanitize=False)
 
     # finally we use the reference molecule to copy the bonds if sensible

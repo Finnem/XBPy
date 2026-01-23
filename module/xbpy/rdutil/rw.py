@@ -284,7 +284,7 @@ def kekulize_mol(mol):
     mol.UpdatePropertyCache(strict=True)
     return mol
 
-def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, try_full = True, as_property_mol = False, verbose = False):
+def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, try_full = True, as_property_mol = False, verbose = "auto"):
     """
     Infer bonds from the proximity of atoms. This is done by checking the distance of each atom to each other atom.
     If the distance is smaller than the sum of the van-der-waals radii, a bond is inferred.
@@ -296,6 +296,7 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
         kekulize (bool): Defaults to True. If True, molecule will be kekulized after adding bonds.
         handle_valency (str): Defaults to "auto". If "auto", valency violations will be resolved by removing the most unlikely bond. If "ignore", valency violations will be ignored. If "raise", valency violations will raise an error.
         allow_hydrogen_gas (bool): Defaults to False. If True, hydrogen gas will be allowed. This means that hydrogen atoms will not be considered to have valency violations.
+        verbose (bool or "auto"): Defaults to "auto". If "auto", verbosity is enabled for large/complex bond inference.
 
     Returns:
         RDKit.Mol: Molecule with inferred bonds.
@@ -308,7 +309,8 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
     from .geometry import position
     from scipy.spatial import cKDTree
 
-    if verbose:
+    verbose_mode = False if verbose == "auto" else bool(verbose)
+    if verbose_mode:
         logger.info("Proximity bond inference started")
     # get the positions of the atoms
     positions = position(mol)
@@ -316,7 +318,7 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
     elements = np.array([atom.GetSymbol() for atom in mol.GetAtoms()])
     max_distance = 2.5
     # create a kdtree for the atoms
-    if verbose: logger.info("Running approximate bonding")
+    if verbose_mode: logger.info("Running approximate bonding")
     tree = cKDTree(positions)
     # query the tree for atoms that are closer than maximum sensible bond length
     d_matrix = tree.sparse_distance_matrix(tree, max_distance = max_distance, output_type = 'coo_matrix')
@@ -337,7 +339,7 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
     mol = Chem.RWMol(mol)
     # Track existing bonds to avoid repeated lookups
     existing_bonds = set()
-    if verbose: logger.info("Assigning bond orders on approximate distances")
+    if verbose_mode: logger.info("Assigning bond orders on approximate distances")
     bond_indices = []
     # create a bond for each pair of close atoms
     for idx, (i, j) in enumerate(close_atoms):
@@ -387,7 +389,7 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
 
     bond_indices = np.asarray(bond_indices)
     # check for valency violations
-    if verbose: logger.info("Running SAT based bond order correction")
+    if verbose_mode: logger.info("Running SAT based bond order correction")
     if correct_bond_orders:
         mol = correct_bond_orders_func(mol, try_full=try_full, verbose=verbose, bond_indices=bond_indices)
 
