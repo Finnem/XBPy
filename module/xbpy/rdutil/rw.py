@@ -1,4 +1,5 @@
 import numpy as np
+import os
 from scipy.spatial import cKDTree
 from scipy.optimize import linear_sum_assignment
 from rdkit.Chem import AllChem
@@ -13,6 +14,8 @@ from scipy.spatial.transform import Rotation
 from .bond_order_inference import correct_bond_orders as correct_bond_orders_func
 from rdkit.Chem.PropertyMol import PropertyMol
 
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 def remove_atoms(mol, atoms):
     """Remove the given atoms from the molecule.
     
@@ -281,7 +284,7 @@ def kekulize_mol(mol):
     mol.UpdatePropertyCache(strict=True)
     return mol
 
-def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, try_full = True, as_property_mol = False):
+def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, try_full = True, as_property_mol = False, verbose = False):
     """
     Infer bonds from the proximity of atoms. This is done by checking the distance of each atom to each other atom.
     If the distance is smaller than the sum of the van-der-waals radii, a bond is inferred.
@@ -305,53 +308,88 @@ def proximity_bond(mol, correct_bond_orders = True, allow_hydrogen_gas = False, 
     from .geometry import position
     from scipy.spatial import cKDTree
 
+    if verbose:
+        logger.info("Proximity bond inference started")
     # get the positions of the atoms
     positions = position(mol)
     periodic_table = Chem.GetPeriodicTable()
     elements = np.array([atom.GetSymbol() for atom in mol.GetAtoms()])
+    max_distance = 2.5
     # create a kdtree for the atoms
+    if verbose: logger.info("Running approximate bonding")
     tree = cKDTree(positions)
-
     # query the tree for atoms that are closer than maximum sensible bond length
-    d_matrix = tree.sparse_distance_matrix(tree, max_distance = 2.5, output_type = 'coo_matrix')
+    d_matrix = tree.sparse_distance_matrix(tree, max_distance = max_distance, output_type = 'coo_matrix')
+    # Pre-filter to only upper triangle to reduce work
+    upper_triangle_mask = d_matrix.row < d_matrix.col
+    row_filtered = d_matrix.row[upper_triangle_mask]
+    col_filtered = d_matrix.col[upper_triangle_mask]
+    data_filtered = d_matrix.data[upper_triangle_mask]
 
-    # get bond_distances for each pair of atoms
-    bond_distances = np.array([bond_lengths[elements[i]][elements[j]] for i, j in zip(d_matrix.row, d_matrix.col)])
+    bond_distances = np.array([bond_lengths[elements[i]][elements[j]] for i, j in zip(row_filtered, col_filtered)])
     
-    cond = (d_matrix.data < bond_distances[:,0] * 1.15) & (d_matrix.row < d_matrix.col)
-    close_atoms = np.vstack([d_matrix.row[cond], d_matrix.col[cond]]).T
+    # Filter by distance threshold
+    cond = data_filtered < bond_distances[:,0] * 1.15
+    close_atoms = np.vstack([row_filtered[cond], col_filtered[cond]]).T
+    close_distances = data_filtered[cond]
+    close_bond_distances = bond_distances[cond]
+    
     mol = Chem.RWMol(mol)
+    # Track existing bonds to avoid repeated lookups
+    existing_bonds = set()
+    if verbose: logger.info("Assigning bond orders on approximate distances")
+    bond_indices = []
     # create a bond for each pair of close atoms
     for idx, (i, j) in enumerate(close_atoms):
         if not allow_hydrogen_gas:
             if (elements[i] == "H") and (elements[j] == "H"):
                 continue
-        dist = d_matrix.data[cond][idx]
-        if dist < bond_distances[cond][idx][3]:
-            if mol.GetBondBetweenAtoms(int(i), int(j)) is None:
+        
+        dist = close_distances[idx]
+        bond_dist = close_bond_distances[idx]
+        bond_key = (int(i), int(j))
+        bond_indices.append(bond_key)
+        
+        # Check if bond exists (cache to avoid repeated lookups)
+        if bond_key in existing_bonds:
+            bond_exists = True
+        else:
+            bond = mol.GetBondBetweenAtoms(int(i), int(j))
+            bond_exists = bond is not None
+            if bond_exists:
+                existing_bonds.add(bond_key)
+        
+        if dist < bond_dist[3]:
+            if not bond_exists:
                 mol.AddBond(int(i), int(j), rdchem.BondType.TRIPLE)
+                existing_bonds.add(bond_key)
             else:
                 mol.GetBondBetweenAtoms(int(i), int(j)).SetBondType(rdchem.BondType.TRIPLE)
-        elif dist < bond_distances[cond][idx][2]:
-            if mol.GetBondBetweenAtoms(int(i), int(j)) is None:
+        elif dist < bond_dist[2]:
+            if not bond_exists:
                 mol.AddBond(int(i), int(j), rdchem.BondType.DOUBLE)
+                existing_bonds.add(bond_key)
             else:
                 mol.GetBondBetweenAtoms(int(i), int(j)).SetBondType(rdchem.BondType.DOUBLE)
-        elif dist < bond_distances[cond][idx][1]:
+        elif dist < bond_dist[1]:
             bond_order = rdchem.BondType.SINGLE#ONEANDAHALF
-            if mol.GetBondBetweenAtoms(int(i), int(j)) is None:
+            if not bond_exists:
                 mol.AddBond(int(i), int(j), bond_order)
+                existing_bonds.add(bond_key)
             else:
                 mol.GetBondBetweenAtoms(int(i), int(j)).SetBondType(bond_order)
         else:
-            if mol.GetBondBetweenAtoms(int(i), int(j)) is None:
+            if not bond_exists:
                 mol.AddBond(int(i), int(j), rdchem.BondType.SINGLE)
+                existing_bonds.add(bond_key)
             else:
                 mol.GetBondBetweenAtoms(int(i), int(j)).SetBondType(rdchem.BondType.SINGLE)
 
+    bond_indices = np.asarray(bond_indices)
     # check for valency violations
+    if verbose: logger.info("Running SAT based bond order correction")
     if correct_bond_orders:
-        mol = correct_bond_orders_func(mol, try_full=try_full)
+        mol = correct_bond_orders_func(mol, try_full=try_full, verbose=verbose, bond_indices=bond_indices)
 
     mol.UpdatePropertyCache(strict=False) 
 

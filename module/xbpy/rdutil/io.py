@@ -132,7 +132,7 @@ def _get_num_mols(path, *args, **kwargs):
 
 
 
-def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, duplicate_check = True, *args, **kwargs):
+def _read_molecules_file(path, store_path = True, reference_molecule = None, proximityBonding=True, as_property_mol = False, duplicate_check = True, verbose = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single pdb, mol or sdf file. A xyz file is converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -151,22 +151,22 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     if os.path.splitext(path)[1] == ".pdb":
         if not "flavor" in kwargs:
             kwargs["flavor"] = 4
-        molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, verbose=verbose, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol2":
-        molecules = [Chem.rdmolfiles.MolFromMol2File(path, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromMol2File(path, verbose=verbose, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol":
-        molecules = [Chem.rdmolfiles.MolFromMolFile(path, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromMolFile(path, verbose=verbose, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".sdf":
-        molecules = Chem.rdmolfiles.SDMolSupplier(path, strictParsing= False, *args, **kwargs)
+        molecules = Chem.rdmolfiles.SDMolSupplier(path, strictParsing= False, verbose=verbose, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".mae":
-        molecules = Chem.rdmolfiles.MaeMolSupplier(path, *args, **kwargs)
+        molecules = Chem.rdmolfiles.MaeMolSupplier(path, verbose=verbose, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".maegz":
-        molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), *args, **kwargs)
+        molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), verbose=verbose, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
-        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, duplicate_check=duplicate_check, *args, **kwargs)
+        molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
     else:
         try:
-            molecules = read_coord_file(path, reference_molecule, proximityBonding=proximityBonding, *args, **kwargs)
+            molecules = read_coord_file(path, reference_molecule, proximityBonding=proximityBonding, verbose=verbose, *args, **kwargs)
         except KeyboardInterrupt:
             raise
         except:
@@ -205,7 +205,7 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     return molecules
 
 
-def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, duplicate_check = True, *args, **kwargs):
+def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, duplicate_check = True, verbose = False, *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
     Args:
@@ -230,7 +230,7 @@ def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True,
                 mol = remove_atoms(mol, [int(i) for i in duplicate_indices])
         # we infer the bonds if requested
         if proximityBonding:
-            mol = proximity_bond(mol, as_property_mol=as_property_mol)
+            mol = proximity_bond(mol, as_property_mol=as_property_mol, verbose=verbose)
             #rdmolops.RemoveHs(mol, implicitOnly=False, updateExplicitCount=False, sanitize=False) # TODO: why was this here?
 
         # finally we use the reference molecule to copy the bonds if sensible

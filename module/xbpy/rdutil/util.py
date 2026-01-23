@@ -365,6 +365,11 @@ possible_geometries = {
         },
     },
     "F": {
+        (0, -1): {
+            (): {
+                "bond_orders": [{}],
+            }
+        },
         (1, 0): {
             (): {
                 "bond_orders": [{1.0: 1}],
@@ -372,6 +377,11 @@ possible_geometries = {
         }
     },
     "Cl": {
+        (0, -1): {
+            (): {
+                "bond_orders": [{}],
+            }
+        },
         (1, 0): {
             (): {
                 "bond_orders": [{1.0: 1}],
@@ -379,6 +389,11 @@ possible_geometries = {
         }
     },
     "Br": {
+        (0, -1): {
+            (): {
+                "bond_orders": [{}],
+            }
+        },
         (1, 0): {
             (): {
                 "bond_orders": [{1.0: 1}],
@@ -386,6 +401,11 @@ possible_geometries = {
         }
     },
     "I": {
+        (0, -1): {
+            (): {
+                "bond_orders": [{}],
+            }
+        },
         (1, 0): {
             (): {
                 "bond_orders": [{1.0: 1}],
@@ -411,6 +431,13 @@ possible_geometries = {
                 "bond_orders": [{1.0: 4}],
             }
         }
+    },
+    "Na": {
+        (0, 1): {
+            (): {
+                "bond_orders": [{}],
+            }
+        },
     },
     "P": {
         (3, 0): {

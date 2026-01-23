@@ -4,172 +4,353 @@ from itertools import combinations
 from .geometry import position
 from .util import possible_geometries, ideal_bond_lengths
 import numpy as np
+from scipy.sparse import csr_matrix, coo_matrix
+from scipy.sparse.csgraph import connected_components
 from rdkit import Chem
+from rdkit.Chem import rdmolops
+import os
+import multiprocessing as _mp
+import logging
+from logging.handlers import QueueHandler, QueueListener
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+_MP_MOL = None
+_MP_ALL_PAIRWISE_BOND_ANGLES = None
+_MP_ALL_BOND_INDICES = None
+_MP_ALL_BOND_LENGTHS = None
+_MP_CSR_ADJ_MATRIX = None
+_MP_LOG_SUBGRAPHS = False
 
-def correct_bond_orders(mol, add_hydrogens = False, try_full = True):
+
+def _get_parallel_processes():
+    env = os.environ.get('XB_Z3_PROCESSES')
+    if env:
+        try:
+            procs = int(env)
+        except ValueError:
+            procs = 1
+        return max(1, procs)
+    cpu_count = os.cpu_count() or 1
+    return max(1, cpu_count - 2)
+
+
+def _configure_worker_logging(log_queue):
+    if log_queue is None:
+        return
+    root_logger = logging.getLogger()
+    root_logger.handlers = [QueueHandler(log_queue)]
+
+
+def _start_log_listener():
+    log_queue = _mp.Queue()
+    root_logger = logging.getLogger()
+    handlers = root_logger.handlers
+    if not handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            "%(asctime)s - %(processName)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        handler.setFormatter(formatter)
+        handlers = [handler]
+    listener = QueueListener(log_queue, *handlers, respect_handler_level=True)
+    listener.start()
+    return log_queue, listener
+
+
+def _init_mp_context(
+    mol,
+    all_bond_indices,
+    all_bond_lengths,
+    all_pairwise_bond_angles,
+    csr_adj_matrix,
+    log_queue,
+    log_subgraphs,
+):
+    global _MP_MOL, _MP_ALL_PAIRWISE_BOND_ANGLES, _MP_ALL_BOND_INDICES, _MP_ALL_BOND_LENGTHS, _MP_CSR_ADJ_MATRIX, _MP_LOG_SUBGRAPHS
+    _MP_MOL = mol
+    _MP_ALL_PAIRWISE_BOND_ANGLES = all_pairwise_bond_angles
+    _MP_ALL_BOND_INDICES = all_bond_indices
+    _MP_ALL_BOND_LENGTHS = all_bond_lengths
+    _MP_CSR_ADJ_MATRIX = csr_adj_matrix
+    _MP_LOG_SUBGRAPHS = log_subgraphs
+    _configure_worker_logging(log_queue)
+
+
+def _solve_subgraph_worker(subgraph):
+    return _solve_subgraph(
+        _MP_MOL,
+        subgraph,
+        _MP_ALL_PAIRWISE_BOND_ANGLES,
+        _MP_ALL_BOND_INDICES,
+        _MP_ALL_BOND_LENGTHS,
+        _MP_CSR_ADJ_MATRIX,
+        _MP_LOG_SUBGRAPHS,
+    )
+
+
+def _solve_subgraph(
+    mol,
+    subgraph,
+    all_pairwise_bond_angles,
+    all_bond_indices,
+    all_bond_lengths,
+    csr_adj_matrix,
+    log_subgraph=False,
+):
+    try:
+        from z3 import Optimize, sat, Solver
+    except ImportError:
+        raise ImportError(
+            "The z3 package is required for this function. Try to install via 'sudo apt install z3' and 'pip install z3-solver'."
+        )
+    if os.environ.get('XB_DEBUG_SAT') == '1':
+        print("Substructure:", [f"{mol.GetAtomWithIdx(i).GetSymbol()}{i}" for i in sorted(subgraph)])
+
+    if log_subgraph:
+        logger.info("Solving subgraph with %s atoms: %s", len(subgraph), sorted(subgraph))
+
+    softened_atoms, strict_atoms = _resolve_unsat_cores_iteratively(
+        mol, subgraph, all_pairwise_bond_angles, all_bond_indices, all_bond_lengths, csr_adj_matrix
+    )
+
+    formula, objective, variable_dict, named_constraints = _construct_SMT_formulation(
+        mol, subgraph, all_pairwise_bond_angles, all_bond_indices, all_bond_lengths, csr_adj_matrix,
+        excluded_atoms=softened_atoms
+    )
+
+    s = Solver()
+    timeout_ms = os.environ.get('XB_Z3_TIMEOUT_MS')
+    if timeout_ms and timeout_ms.isdigit():
+        s.set("timeout", int(timeout_ms))
+    if os.environ.get('XB_DEBUG_SAT') == '1':
+        for cname, cexpr in named_constraints.items():
+            s.assert_and_track(cexpr, cname)
+    sat_result = s.check()
+    if sat_result != sat:
+        raise ValueError(f"System is not satisfiable even after constraint softening. SAT result: {sat_result}")
+
+    opt = Optimize()
+    timeout_ms = os.environ.get('XB_Z3_TIMEOUT_MS')
+    if timeout_ms and timeout_ms.isdigit():
+        opt.set("timeout", int(timeout_ms))
+    opt.add(formula)
+    opt.minimize(objective)
+    opt_result = opt.check()
+    if opt_result != sat:
+        raise ValueError(
+            f"Optimization failed for atoms {[mol.GetAtomWithIdx(idx).GetSymbol() + ':' + str(idx) for idx in subgraph]}. Result: {opt_result}"
+        )
+
+    model = opt.model()
+    new_bond_orders, assigned_charges = _decode_solution(model)
+
+    if log_subgraph:
+        logger.info("Solved subgraph with %s atoms", len(subgraph))
+    return subgraph, softened_atoms, new_bond_orders, assigned_charges
+
+def _get_atom_statistics(atoms, mol):
+    symbol_count = {}
+    for atom in atoms:
+        symbol = mol.GetAtomWithIdx(atom).GetSymbol()
+        if symbol not in symbol_count:
+            symbol_count[symbol] = 0
+        symbol_count[symbol] += 1
+    return symbol_count
+
+def adj_matrix_from_bond_indices(bond_indices, num_atoms):
+    rows = bond_indices[:, 0]
+    cols = bond_indices[:, 1]
+    data = np.ones(len(rows) * 2, dtype=np.int8)
+    all_rows = np.concatenate([rows, cols])
+    all_cols = np.concatenate([cols, rows])
+    return coo_matrix((data, (all_rows, all_cols)), shape=(num_atoms, num_atoms)).tocsr()
+
+def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = False, bond_indices = None):
     try:
         from z3 import Optimize, sat, Solver, IntVal
     except ImportError:
         raise ImportError("The z3 package is required for this function. Try to install via 'sudo apt install z3' and 'pip install z3-solver'.")
 
-    all_bond_length = {}
-    for bond in mol.GetBonds():
-        length = np.linalg.norm(position(bond.GetBeginAtom()) - position(bond.GetEndAtom()))
-        all_bond_length[(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())] = length
-        all_bond_length[(bond.GetEndAtomIdx(), bond.GetBeginAtomIdx())] = length
+    num_bonds = mol.GetNumBonds()
+
+    if verbose: logger.info(f"Fetching approximate bond lengths for {mol.GetNumBonds()} bonds")
+    if bond_indices is None:
+        adj_matrix = rdmolops.GetAdjacencyMatrix(mol)
+        bond_indices = np.argwhere(adj_matrix == 1)
+    elif len(bond_indices) != num_bonds:
+        logger.warning(f"Bond indices length {len(bond_indices)} does not match number of bonds {num_bonds}. Using all bonds.")
+        adj_matrix = rdmolops.GetAdjacencyMatrix(mol)
+        bond_indices = np.argwhere(adj_matrix == 1)
+    all_bond_indices = bond_indices
+    csr_adj_matrix = adj_matrix_from_bond_indices(all_bond_indices, mol.GetNumAtoms())
+    positions = position(mol)
+    bond_positions = positions[all_bond_indices]
+    bond_lengths = np.linalg.norm(bond_positions[:, 0] - bond_positions[:, 1], axis=1)
+    if verbose: logger.info(f"Fetching approximate bond angles for {mol.GetNumBonds()} bonds")
     all_pairwise_bond_angles = _get_all_pairwise_bond_angles(mol)
-    violating_atoms = _get_violating_atom_clusters(mol, all_pairwise_bond_angles, add_hydrogens = add_hydrogens)
-    if len(violating_atoms) == 0:
+
+    if verbose: logger.info("Fetching violating atoms")
+    violating_atom_indices = _get_violating_atom_clusters(mol, all_pairwise_bond_angles, add_hydrogens = add_hydrogens)
+    if verbose: logger.info(f"Found {len(violating_atom_indices)} violating atoms: {_get_atom_statistics(violating_atom_indices, mol)}")
+    if len(violating_atom_indices) == 0:
         return mol
     # Expand the set by one-hop neighbors so substructures include bonded context (incl. hydrogens)
-    expanded_atoms = set(violating_atoms)
-    for idx in list(violating_atoms):
-        atom = mol.GetAtomWithIdx(idx)
-        for nbr in atom.GetNeighbors():
-            expanded_atoms.add(nbr.GetIdx())
-    connected_subgraphs = _get_connected_subgraphs(mol, expanded_atoms)
+    expanded_atom_indices = set(violating_atom_indices)
+    for idx in list(violating_atom_indices):
+        for nbr in mol.GetAtomWithIdx(idx).GetNeighbors():
+            expanded_atom_indices.add(nbr.GetIdx())
+    if verbose: logger.info(f"Determining connected subgraphs for {len(expanded_atom_indices)} atoms")
+    connected_subgraphs = _get_connected_subgraphs(csr_adj_matrix, expanded_atom_indices)
+    if verbose: logger.info(f"Found {len(connected_subgraphs)} connected subgraphs")
     new_mol = Chem.RWMol(mol)
     try:
-        for subgraph in connected_subgraphs:
-            # Print substructure atoms concisely (debug only)
-            import os
-            if os.environ.get('XB_DEBUG_SAT') == '1':
-                print("Substructure:", [f"{mol.GetAtomWithIdx(i).GetSymbol()}{i}" for i in sorted(subgraph)])
-            
-            # First try to soften constraints iteratively until SAT
-            softened_atoms, strict_atoms = _resolve_unsat_cores_iteratively(mol, subgraph, all_pairwise_bond_angles, all_bond_length)
-            
-            if not strict_atoms:
-                pass
-            
-            # Now solve with all atoms, but with softened constraints for problematic ones
-            
-            formula, objective, variable_dict, named_constraints = _construct_SMT_formulation(mol, subgraph, all_pairwise_bond_angles, all_bond_length, excluded_atoms=softened_atoms)
-            
-            # First check if the system is SAT at all
-            s = Solver()
-            # Track all named constraints only if debugging
-            import os
-            if os.environ.get('XB_DEBUG_SAT') == '1':
-                for cname, cexpr in named_constraints.items():
-                    s.assert_and_track(cexpr, cname)
-            sat_result = s.check()
-            
-            if sat_result != sat:
-                raise ValueError(f"System is not satisfiable even after constraint softening. SAT result: {sat_result}")
-            
-            # Debug: dump SAT model (pre-optimization) gated by env var XB_DEBUG_SAT=1
-            import os
-            if os.environ.get('XB_DEBUG_SAT') == '1':
-                try:
-                    sat_model = s.model()
-                    print("\n--- DEBUG: Pre-optimization SAT model (non-zero selections) ---")
-                    # Bond orders selected (==1)
-                    bond_selected = []
-                    charge_selected = []
-                    geom_selected = []
-                    for key, var in variable_dict.items():
-                        try:
-                            val = sat_model.evaluate(var, model_completion=True)
-                            if hasattr(val, 'as_long'):
-                                ival = val.as_long()
-                            else:
-                                ival = int(str(val))
-                        except Exception:
-                            continue
-                        if ival != 1:
-                            continue
-                        if isinstance(key, tuple) and len(key) == 3:
-                            a1, a2, bo = key
-                            bond_selected.append((a1, a2, bo))
-                        elif isinstance(key, tuple) and len(key) == 2:
-                            a, ch = key
-                            charge_selected.append((a, ch))
-                        elif isinstance(key, tuple) and len(key) == 4:
-                            a, nc, ch, ang = key
-                            geom_selected.append((a, nc, ch, ang))
-                    if bond_selected:
-                        print("Bond orders (==1):")
-                        for a1, a2, bo in bond_selected:
-                            print(f"  {mol.GetAtomWithIdx(a1).GetSymbol()}{a1}-{mol.GetAtomWithIdx(a2).GetSymbol()}{a2}: {bo}")
-                    if charge_selected:
-                        print("Formal charges (==1):")
-                        for a, ch in charge_selected:
-                            ctype = "softened" if a in softened_atoms else "strict"
-                            print(f"  {mol.GetAtomWithIdx(a).GetSymbol()}{a}: {ch} ({ctype})")
-                    if geom_selected:
-                        print("Geometries (==1):")
-                        for a, nc, ch, ang in geom_selected:
-                            print(f"  {mol.GetAtomWithIdx(a).GetSymbol()}{a}: neighbors={nc}, charge={ch}, angles={ang}")
-                except Exception as e:
-                    print(f"(debug model dump failed: {e})")
-
-            # If SAT, use Optimize to find the best solution
-            
-            opt = Optimize()
-            opt.add(formula)
-            opt.minimize(objective)
-            opt_result = opt.check()
-            
-            if opt_result == sat:
-                model = opt.model()
-                new_bond_orders, assigned_charges = _decode_solution(model)
-                
-                # Print only assignments relevant to softened atoms (only if any softened)
-                if softened_atoms:
-                    print(f"\n=== FINAL ASSIGNMENTS (softened atoms only) ===")
-                    # Bonds per softened atom
-                    any_bond_printed = False
-                    for a in sorted(softened_atoms):
-                        atom_symbol = mol.GetAtomWithIdx(a).GetSymbol()
-                        printed_for_atom = False
-                        for (a1, a2), bo in new_bond_orders.items():
-                            if a1 == a or a2 == a:
-                                if not any_bond_printed:
-                                    print("Bond orders:")
-                                    any_bond_printed = True
-                                nbr = a2 if a1 == a else a1
-                                nbr_symbol = mol.GetAtomWithIdx(nbr).GetSymbol()
-                                print(f"  {atom_symbol}{a}-{nbr_symbol}{nbr}: {bo}")
-                                printed_for_atom = True
-                        if not printed_for_atom:
-                            print(f"  {atom_symbol}{a}: no bond order selection (all 0)")
-                    # Charges for softened atoms
-                    any_charge_printed = False
-                    for a in sorted(softened_atoms):
-                        atom_symbol = mol.GetAtomWithIdx(a).GetSymbol()
-                        if a in assigned_charges:
-                            if not any_charge_printed:
-                                print("Formal charges:")
-                                any_charge_printed = True
-                            print(f"  {atom_symbol}{a}: {assigned_charges[a]} (softened)")
-                    if not any_charge_printed:
-                        print("Formal charges: none selected for softened atoms")
-                
-                # Apply the assignments to the molecule
-                for (atom1, atom2), bond_order in new_bond_orders.items():
-                    if bond_order == 0.0:
-                        new_mol.RemoveBond(int(atom1), int(atom2))
+        if verbose: logger.info("Solving subgraphs...")
+        if verbose:
+            try:
+                from tqdm import tqdm as _tqdm
+            except ImportError:
+                _tqdm = None
+        else:
+            _tqdm = None
+        use_parallel = len(connected_subgraphs) > 1
+        processes = _get_parallel_processes()
+        if use_parallel and processes > 1:
+            try:
+                log_queue = None
+                log_listener = None
+                if verbose:
+                    log_queue, log_listener = _start_log_listener()
+                ctx = _mp.get_context("fork")
+                with ctx.Pool(
+                    processes=processes,
+                    initializer=_init_mp_context,
+                    initargs=(
+                        mol,
+                        all_bond_indices,
+                        bond_lengths,
+                        all_pairwise_bond_angles,
+                        csr_adj_matrix,
+                        log_queue,
+                        verbose,
+                    ),
+                ) as pool:
+                    if _tqdm:
+                        results = list(
+                            _tqdm(
+                                pool.imap_unordered(_solve_subgraph_worker, connected_subgraphs, chunksize=1),
+                                total=len(connected_subgraphs),
+                                desc="Solving subgraphs",
+                                unit="subgraph",
+                            )
+                        )
                     else:
-                        new_mol.GetBondBetweenAtoms(int(atom1), int(atom2)).SetBondType(Chem.BondType(bond_order))
-                for atom, charge in assigned_charges.items():
-                    new_mol.GetAtomWithIdx(atom).SetFormalCharge(charge)
-                
-            else:
-                raise ValueError(f"Optimization failed for atoms {[mol.GetAtomWithIdx(idx).GetSymbol() + ':' + str(idx) for idx in subgraph]}. Result: {opt_result}")
+                        results = pool.map(_solve_subgraph_worker, connected_subgraphs)
+            except Exception:
+                subgraph_iter = connected_subgraphs
+                if _tqdm:
+                    subgraph_iter = _tqdm(
+                        connected_subgraphs,
+                        total=len(connected_subgraphs),
+                        desc="Solving subgraphs",
+                        unit="subgraph",
+                    )
+                results = [
+                    _solve_subgraph(
+                        mol,
+                        subgraph,
+                        all_pairwise_bond_angles,
+                        all_bond_indices,
+                        bond_lengths,
+                        csr_adj_matrix,
+                        verbose,
+                    )
+                    for subgraph in subgraph_iter
+                ]
+            finally:
+                if log_listener:
+                    log_listener.stop()
+                if log_queue:
+                    log_queue.close()
+        else:
+            subgraph_iter = connected_subgraphs
+            if _tqdm:
+                subgraph_iter = _tqdm(
+                    connected_subgraphs,
+                    total=len(connected_subgraphs),
+                    desc="Solving subgraphs",
+                    unit="subgraph",
+                )
+            results = [
+                _solve_subgraph(
+                    mol,
+                    subgraph,
+                    all_pairwise_bond_angles,
+                    all_bond_indices,
+                    bond_lengths,
+                    csr_adj_matrix,
+                    verbose,
+                )
+                for subgraph in subgraph_iter
+            ]
+
+        for subgraph, softened_atoms, new_bond_orders, assigned_charges in results:
+            # Print only assignments relevant to softened atoms (only if any softened)
+            if softened_atoms:
+                print(f"\n=== FINAL ASSIGNMENTS (softened atoms only) ===")
+                # Bonds per softened atom
+                any_bond_printed = False
+                for a in sorted(softened_atoms):
+                    atom_symbol = mol.GetAtomWithIdx(a).GetSymbol()
+                    printed_for_atom = False
+                    for (a1, a2), bo in new_bond_orders.items():
+                        if a1 == a or a2 == a:
+                            if not any_bond_printed:
+                                print("Bond orders:")
+                                any_bond_printed = True
+                            nbr = a2 if a1 == a else a1
+                            nbr_symbol = mol.GetAtomWithIdx(nbr).GetSymbol()
+                            print(f"  {atom_symbol}{a}-{nbr_symbol}{nbr}: {bo}")
+                            printed_for_atom = True
+                    if not printed_for_atom:
+                        print(f"  {atom_symbol}{a}: no bond order selection (all 0)")
+                # Charges for softened atoms
+                any_charge_printed = False
+                for a in sorted(softened_atoms):
+                    atom_symbol = mol.GetAtomWithIdx(a).GetSymbol()
+                    if a in assigned_charges:
+                        if not any_charge_printed:
+                            print("Formal charges:")
+                            any_charge_printed = True
+                        print(f"  {atom_symbol}{a}: {assigned_charges[a]} (softened)")
+                if not any_charge_printed:
+                    print("Formal charges: none selected for softened atoms")
+
+            # Apply the assignments to the molecule
+            for (atom1, atom2), bond_order in new_bond_orders.items():
+                if bond_order == 0.0:
+                    new_mol.RemoveBond(int(atom1), int(atom2))
+                else:
+                    new_mol.GetBondBetweenAtoms(int(atom1), int(atom2)).SetBondType(Chem.BondType(bond_order))
+            for atom, charge in assigned_charges.items():
+                new_mol.GetAtomWithIdx(atom).SetFormalCharge(charge)
         return new_mol
     except ValueError as e:
         if try_full:
             
             # Try to soften constraints iteratively for the full molecule
-            softened_atoms, strict_atoms = _resolve_unsat_cores_iteratively(mol, range(mol.GetNumAtoms()), all_pairwise_bond_angles, all_bond_length)
+            softened_atoms, strict_atoms = _resolve_unsat_cores_iteratively(
+                mol, range(mol.GetNumAtoms()), all_pairwise_bond_angles, all_bond_indices, bond_lengths, csr_adj_matrix
+            )
             
             if not strict_atoms:
                 pass
             
             # Now solve with all atoms, but with softened constraints for problematic ones
             
-            formula, objective, variable_dict, named_constraints = _construct_SMT_formulation(mol, range(mol.GetNumAtoms()), all_pairwise_bond_angles, all_bond_length, excluded_atoms=softened_atoms)
+            formula, objective, variable_dict, named_constraints = _construct_SMT_formulation(
+                mol, range(mol.GetNumAtoms()), all_pairwise_bond_angles, all_bond_indices, bond_lengths, csr_adj_matrix,
+                excluded_atoms=softened_atoms
+            )
             
             # First check if the system is SAT at all
             s = Solver()
@@ -180,7 +361,6 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True):
                 raise ValueError(f"System is not satisfiable even after constraint softening. SAT result: {sat_result}")
             
             # Debug: dump SAT model (pre-optimization) gated by env var XB_DEBUG_SAT=1
-            import os
             if os.environ.get('XB_DEBUG_SAT') == '1':
                 try:
                     sat_model = s.model()
@@ -291,7 +471,17 @@ angle_deviation_weighting = 1
 
 ideal_bond_length_order_indices = {1.0: 0, 2.0: 2, 3.0: 3}
 
-def _construct_SMT_formulation(mol, indices, all_pairwise_bond_angles, all_bond_Lengths, angle_tolerance=20, enable_atom_activation=False, excluded_atoms=None):
+def _construct_SMT_formulation(
+    mol,
+    indices,
+    all_pairwise_bond_angles,
+    bond_indices,
+    bond_lengths,
+    csr_adj_matrix,
+    angle_tolerance=20,
+    enable_atom_activation=False,
+    excluded_atoms=None,
+):
     try:
         from z3 import Or, And, Int, RealVal, Sum, Solver, Implies, IntVal, Bool, BoolVal
     except ImportError:
@@ -299,6 +489,11 @@ def _construct_SMT_formulation(mol, indices, all_pairwise_bond_angles, all_bond_
 
     considered_atoms = [mol.GetAtomWithIdx(idx) for idx in indices]
     penalty_expressions = [RealVal(0)]
+
+    bond_length_lookup = {
+        (int(idx1), int(idx2)): float(length)
+        for (idx1, idx2), length in zip(bond_indices, bond_lengths)
+    }
     
     # Atom activation variables for unsat core analysis
     atom_activation_vars = {}
@@ -318,70 +513,77 @@ def _construct_SMT_formulation(mol, indices, all_pairwise_bond_angles, all_bond_
     bond_order_constraints = []
     bond_order_is_bool = []
 
-    for bond in mol.GetBonds():
-        if bond.GetBeginAtomIdx() in indices and bond.GetEndAtomIdx() in indices:
-            # bond order = 0 => no bond between the atoms
-            for bond_order in range(4):
-                bond_order = float(bond_order)
-                symbol = Int(f"bond_order_{bond.GetBeginAtomIdx()}_{bond.GetEndAtomIdx()}_{bond_order}")
-                bond_order_variables[(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx(), bond_order)] = symbol
-                bond_order_variables[(bond.GetEndAtomIdx(), bond.GetBeginAtomIdx(), bond_order)] = symbol
-                # Booleanity guarded/relaxed
-                b_atom1 = bond.GetBeginAtomIdx()
-                b_atom2 = bond.GetEndAtomIdx()
-                if b_atom1 in excluded_atoms or b_atom2 in excluded_atoms:
-                    bool_constraint = BoolVal(True)
-                    bool_name = f"bool_bond_relaxed_{b_atom1}_{b_atom2}_{int(bond_order)}"
-                else:
-                    base_bool = Or(symbol == 0, symbol == 1)
-                    if enable_atom_activation:
-                        bool_constraint = Implies(And(atom_activation_vars[b_atom1], atom_activation_vars[b_atom2]), base_bool)
-                        bool_name = f"bool_bond_{b_atom1}_{b_atom2}_{int(bond_order)}_conditional"
+    indices_set = set(indices)
+    seen_bonds = set()
+    for atom in considered_atoms:
+        atom1_idx = atom.GetIdx()
+        for atom2_idx in csr_adj_matrix[atom1_idx].indices:
+            neighbor = mol.GetAtomWithIdx(int(atom2_idx))
+            bond_key = (min(atom1_idx, atom2_idx), max(atom1_idx, atom2_idx))
+            if bond_key in seen_bonds:
+                continue
+            seen_bonds.add(bond_key)
+            bond = mol.GetBondBetweenAtoms(int(atom1_idx), int(atom2_idx))
+            if bond is None:
+                continue
+            if atom1_idx in indices_set and atom2_idx in indices_set:
+                # bond order = 0 => no bond between the atoms
+                for bond_order in range(4):
+                    bond_order = float(bond_order)
+                    symbol = Int(f"bond_order_{atom1_idx}_{atom2_idx}_{bond_order}")
+                    bond_order_variables[(atom1_idx, atom2_idx, bond_order)] = symbol
+                    bond_order_variables[(atom2_idx, atom1_idx, bond_order)] = symbol
+                    # Booleanity guarded/relaxed
+                    if atom1_idx in excluded_atoms or atom2_idx in excluded_atoms:
+                        bool_constraint = BoolVal(True)
+                        bool_name = f"bool_bond_relaxed_{atom1_idx}_{atom2_idx}_{int(bond_order)}"
                     else:
-                        bool_constraint = base_bool
-                        bool_name = f"bool_bond_{b_atom1}_{b_atom2}_{int(bond_order)}"
-                bond_order_is_bool.append(bool_constraint)
-                named_constraints[bool_name] = bool_constraint
-                # add bond length deviation penalty
-                if bond_order > 0:
-                    bond_length = all_bond_Lengths[(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx())]
-                    ideal_bond_length = ideal_bond_lengths[bond.GetBeginAtom().GetSymbol()][bond.GetEndAtom().GetSymbol()][ideal_bond_length_order_indices[bond_order]]
-                    penalty_expressions.append((ideal_bond_length - bond_length) * symbol)
-                else:
-                    penalty_expressions.append(10 * symbol)
+                        base_bool = Or(symbol == 0, symbol == 1)
+                        if enable_atom_activation:
+                            bool_constraint = Implies(And(atom_activation_vars[atom1_idx], atom_activation_vars[atom2_idx]), base_bool)
+                            bool_name = f"bool_bond_{atom1_idx}_{atom2_idx}_{int(bond_order)}_conditional"
+                        else:
+                            bool_constraint = base_bool
+                            bool_name = f"bool_bond_{atom1_idx}_{atom2_idx}_{int(bond_order)}"
+                    bond_order_is_bool.append(bool_constraint)
+                    named_constraints[bool_name] = bool_constraint
+                    # add bond length deviation penalty
+                    if bond_order > 0:
+                        bond_length = bond_length_lookup.get((atom1_idx, atom2_idx))
+                        if bond_length is None:
+                            bond_length = bond_length_lookup.get((atom2_idx, atom1_idx))
+                        if bond_length is None:
+                            continue
+                        ideal_bond_length = ideal_bond_lengths[atom.GetSymbol()][neighbor.GetSymbol()][ideal_bond_length_order_indices[bond_order]]
+                        penalty_expressions.append((ideal_bond_length - bond_length) * symbol)
+                    else:
+                        penalty_expressions.append(10 * symbol)
 
-            # bond order exclusivity
-            atom1_idx = bond.GetBeginAtomIdx()
-            atom2_idx = bond.GetEndAtomIdx()
-            
-            # Check if either atom is excluded
-            atom1_excluded = atom1_idx in excluded_atoms
-            atom2_excluded = atom2_idx in excluded_atoms
-            
-            if atom1_excluded or atom2_excluded:
-                # For excluded atoms, just require non-negative values (relaxed constraint)
-                relaxed_constraint = And([bond_order_variables[(atom1_idx, atom2_idx, bond_order)] >= 0 for bond_order in range(4)])
-                constraint = relaxed_constraint
-                constraint_name = f"bond_relaxed_{atom1_idx}_{atom2_idx}"
-            else:
-                # For non-excluded atoms, enforce strict exclusivity
-                base_constraint = Sum([bond_order_variables[(atom1_idx, atom2_idx, bond_order)] for bond_order in range(4)]) == 1
-                
-                if enable_atom_activation:
-                    # Only enforce this constraint if both atoms are active
-                    constraint = Implies(And(atom_activation_vars[atom1_idx], atom_activation_vars[atom2_idx]), base_constraint)
-                    constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}_conditional"
+                # bond order exclusivity
+                atom1_excluded = atom1_idx in excluded_atoms
+                atom2_excluded = atom2_idx in excluded_atoms
+                if atom1_excluded or atom2_excluded:
+                    relaxed_constraint = And([bond_order_variables[(atom1_idx, atom2_idx, bond_order)] >= 0 for bond_order in range(4)])
+                    constraint = relaxed_constraint
+                    constraint_name = f"bond_relaxed_{atom1_idx}_{atom2_idx}"
                 else:
-                    constraint = base_constraint
-                    constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}"
-            
-            bond_order_exclusivity.append(constraint)
-            named_constraints[constraint_name] = constraint
-        elif bond.GetBeginAtomIdx() in indices or bond.GetEndAtomIdx() in indices:
-            for bond_order in range(4):
-                bond_order = float(bond_order)
-                bond_order_variables[(bond.GetBeginAtom().GetIdx(), bond.GetEndAtom().GetIdx(), bond_order)] = IntVal(int(bond.GetBondTypeAsDouble() == bond_order))
-                bond_order_variables[(bond.GetEndAtom().GetIdx(), bond.GetBeginAtom().GetIdx(), bond_order)] = IntVal(int(bond.GetBondTypeAsDouble() == bond_order))
+                    base_constraint = Sum([bond_order_variables[(atom1_idx, atom2_idx, bond_order)] for bond_order in range(4)]) == 1
+                    if enable_atom_activation:
+                        constraint = Implies(And(atom_activation_vars[atom1_idx], atom_activation_vars[atom2_idx]), base_constraint)
+                        constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}_conditional"
+                    else:
+                        constraint = base_constraint
+                        constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}"
+                bond_order_exclusivity.append(constraint)
+                named_constraints[constraint_name] = constraint
+            elif atom1_idx in indices_set or atom2_idx in indices_set:
+                # Only one atom in indices: fix bond order to the existing value
+                bond_type = bond.GetBondTypeAsDouble()
+                for bond_order in range(4):
+                    bond_order = float(bond_order)
+                    val = IntVal(int(bond_type == bond_order))
+                    bond_order_variables[(atom1_idx, atom2_idx, bond_order)] = val
+                    bond_order_variables[(atom2_idx, atom1_idx, bond_order)] = val
 
     # determine possible charges for each element
     possible_charges = {}
@@ -550,7 +752,14 @@ def _construct_SMT_formulation(mol, indices, all_pairwise_bond_angles, all_bond_
     else:
         return formula, objective, variable_dicts, named_constraints
 
-def _resolve_unsat_cores_iteratively(mol, indices, all_pairwise_bond_angles, all_bond_lengths):
+def _resolve_unsat_cores_iteratively(
+    mol,
+    indices,
+    all_pairwise_bond_angles,
+    bond_indices,
+    bond_lengths,
+    csr_adj_matrix,
+):
     """
     Iteratively resolve unsat cores by softening constraints for problematic atoms until SAT is achieved.
     Returns the set of atoms that need softened constraints to make the system SAT.
@@ -560,16 +769,20 @@ def _resolve_unsat_cores_iteratively(mol, indices, all_pairwise_bond_angles, all
     all_atoms = set(indices)
     softened_atoms = set()
     
-    import os
-    
     while True:
         if os.environ.get('XB_DEBUG_SAT') == '1':
             print(f"\n--- Iteration with {len(softened_atoms)} softened atoms ---")
         
         # Build formula with current softened atoms
         formula, objective, variable_dict, named_constraints, atom_activation_vars = _construct_SMT_formulation(
-            mol, list(all_atoms), all_pairwise_bond_angles, all_bond_lengths, 
-            enable_atom_activation=True, excluded_atoms=softened_atoms
+            mol,
+            list(all_atoms),
+            all_pairwise_bond_angles,
+            bond_indices,
+            bond_lengths,
+            csr_adj_matrix,
+            enable_atom_activation=True,
+            excluded_atoms=softened_atoms,
         )
         
         # Assumption-based SAT check so unsat core contains only atom activations
@@ -625,51 +838,30 @@ def _resolve_unsat_cores_iteratively(mol, indices, all_pairwise_bond_angles, all
     
     return softened_atoms, all_atoms - softened_atoms
 
-def _get_connected_subgraphs(mol, indices):
+def _get_connected_subgraphs(csr_adj_matrix, indices):
     """
-    Given an RDKit molecule and a set of atom indices, identifies the connected subgraphs
-    in the subgraph induced by the indices.
+    Given a set of atom indices, identifies the connected subgraphs induced by those indices,
+    using a sparse adjacency matrix for the full molecule.
 
     Args:
-        mol (rdkit.Chem.rdchem.Mol): The molecule.
+        csr_adj_matrix (scipy.sparse.csr_matrix): Full-molecule adjacency matrix.
         indices (list or set of int): The atom indices to consider.
 
     Returns:
         list of sets of int: Each set is a connected component of atom indices.
     """
-    # Ensure indices are in a set for faster lookup
     indices_set = set(indices)
-    
-    # Build adjacency list for the induced subgraph
-    adjacency = {idx: [] for idx in indices_set}
-    for bond in mol.GetBonds():
-        idx1 = bond.GetBeginAtomIdx()
-        idx2 = bond.GetEndAtomIdx()
-        # Include the bond if both atoms are in the specified indices
-        if idx1 in indices_set and idx2 in indices_set:
-            adjacency[idx1].append(idx2)
-            adjacency[idx2].append(idx1)
+    if not indices_set:
+        return []
 
-    # Initialize variables for DFS
-    visited = set()
-    connected_components = []
+    indices_list = sorted(indices_set)
+    sub_adj = csr_adj_matrix[indices_list][:, indices_list]
 
-    # Perform DFS to find connected components
-    for idx in indices_set:
-        if idx not in visited:
-            stack = [idx]
-            component = set()
-            while stack:
-                current_idx = stack.pop()
-                if current_idx not in visited:
-                    visited.add(current_idx)
-                    component.add(current_idx)
-                    # Add neighbors to stack
-                    for neighbor in adjacency[current_idx]:
-                        if neighbor not in visited:
-                            stack.append(neighbor)
-            connected_components.append(component)
-    return connected_components
+    n_components, labels = connected_components(sub_adj, directed=False, return_labels=True)
+    components = [set() for _ in range(n_components)]
+    for pos, label in enumerate(labels):
+        components[label].add(indices_list[pos])
+    return components
 
 def _get_all_pairwise_bond_angles(mol):
     positions = position(mol)
@@ -693,9 +885,15 @@ def _get_violating_atom_clusters(mol, all_pairwise_bond_angles, angle_tolerance 
         pairwise_bond_angles = all_pairwise_bond_angles[atom.GetIdx()]
         found_angles = set(pairwise_bond_angles.values())
 
-        # get geometry
-        this_possible_geometries = possible_geometries.get(atom.GetSymbol(), {}).get((len(atom.GetNeighbors()), int(atom.GetFormalCharge())), {})
-        if len(possible_geometries) == 0:
+        # get geometry: consider any charge state for this neighbor count
+        symbol = atom.GetSymbol()
+        neighbor_count = len(atom.GetNeighbors())
+        all_geometries = possible_geometries.get(symbol, {})
+        this_possible_geometries = {}
+        for (geom_neighbors, geom_charge), geom_info in all_geometries.items():
+            if geom_neighbors == neighbor_count:
+                this_possible_geometries.update(geom_info)
+        if len(this_possible_geometries) == 0:
             violating_atoms.add(atom.GetIdx())
             continue
 
