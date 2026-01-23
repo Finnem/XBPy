@@ -10,6 +10,7 @@ logging.basicConfig(
 
 def test_fragmentation():
     mol = next(rdutil.read_molecules("larger_test_case.xyz", verbose = True))
+    rdutil.write_molecules([mol], "larger_test_case_connected.sdf")
     frags = fragment_molecule(mol, 1519)
     i = 0
     for frag in frags:

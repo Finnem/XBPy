@@ -1,6 +1,6 @@
 
 from ..mathutils.geometry import calculate_angle
-from itertools import combinations
+from itertools import combinations, count
 from .geometry import position
 from .util import possible_geometries, ideal_bond_lengths
 import numpy as np
@@ -20,6 +20,41 @@ _MP_ALL_BOND_INDICES = None
 _MP_ALL_BOND_LENGTHS = None
 _MP_CSR_ADJ_MATRIX = None
 _MP_LOG_SUBGRAPHS = False
+_MIN_SUBGRAPH_SIZE = 25
+
+
+def _progress_add_total(progress, delta=1):
+    if progress is None:
+        return
+    if getattr(progress, "_xb_total_mode", None) == "estimated":
+        return
+    progress.total = (progress.total or 0) + delta
+    progress.refresh()
+
+
+def _progress_update(progress, delta=1):
+    if progress is None:
+        return
+    progress.update(delta)
+
+
+def _progress_adjust_total(progress, delta=0):
+    if progress is None or not delta:
+        return
+    progress.total = (progress.total or 0) + delta
+    progress.refresh()
+
+
+def _estimate_subgraph_leaf_count(subgraph, mol, csr_adj_matrix):
+    if len(subgraph) <= _MIN_SUBGRAPH_SIZE:
+        return 1
+    candidates = _iter_cc_bridge_splits(subgraph, mol, csr_adj_matrix)
+    if not candidates:
+        return 1
+    _, comp_a, comp_b = candidates[0]
+    return _estimate_subgraph_leaf_count(comp_a, mol, csr_adj_matrix) + _estimate_subgraph_leaf_count(
+        comp_b, mol, csr_adj_matrix
+    )
 
 
 def _get_parallel_processes():
@@ -77,14 +112,18 @@ def _init_mp_context(
 
 
 def _solve_subgraph_worker(subgraph):
-    return _solve_subgraph(
+    subgraph, free_bond_pairs, subgraph_id, parent_id = subgraph
+    return _solve_subgraph_leaf(
         _MP_MOL,
         subgraph,
         _MP_ALL_PAIRWISE_BOND_ANGLES,
         _MP_ALL_BOND_INDICES,
         _MP_ALL_BOND_LENGTHS,
         _MP_CSR_ADJ_MATRIX,
-        _MP_LOG_SUBGRAPHS,
+        log_subgraph=_MP_LOG_SUBGRAPHS,
+        free_bond_pairs=free_bond_pairs,
+        subgraph_id=subgraph_id,
+        parent_id=parent_id,
     )
 
 
@@ -96,6 +135,113 @@ def _solve_subgraph(
     all_bond_lengths,
     csr_adj_matrix,
     log_subgraph=False,
+    free_bond_pairs=None,
+    pool=None,
+    subgraph_id=None,
+    parent_id=None,
+    id_counter=None,
+    progress=None,
+):
+    if os.environ.get('XB_DEBUG_SAT') == '1':
+        print("Substructure:", [f"{mol.GetAtomWithIdx(i).GetSymbol()}{i}" for i in sorted(subgraph)])
+
+    if free_bond_pairs is None:
+        free_bond_pairs = set()
+
+    estimated_leaf_count = None
+    if progress is not None and getattr(progress, "_xb_total_mode", None) == "estimated":
+        estimated_leaf_count = _estimate_subgraph_leaf_count(subgraph, mol, csr_adj_matrix)
+
+    if pool is not None and len(subgraph) <= _MIN_SUBGRAPH_SIZE:
+        _progress_add_total(progress, 1)
+        args = (subgraph, frozenset(free_bond_pairs), subgraph_id, parent_id)
+        async_result = pool.apply_async(_solve_subgraph_worker, (args,))
+        result = async_result.get()
+        _progress_update(progress, 1)
+        return result
+
+    if len(subgraph) > _MIN_SUBGRAPH_SIZE:
+        for bond_key, comp_a, comp_b in _iter_cc_bridge_splits(subgraph, mol, csr_adj_matrix):
+            if log_subgraph:
+                logger.debug("Solving bridge split with bond key %s", bond_key)
+            try:
+                child_counter = id_counter or count()
+                child_a_id = next(child_counter)
+                child_b_id = next(child_counter)
+                result_a = _solve_subgraph(
+                    mol,
+                    comp_a,
+                    all_pairwise_bond_angles,
+                    all_bond_indices,
+                    all_bond_lengths,
+                    csr_adj_matrix,
+                    log_subgraph,
+                    free_bond_pairs=free_bond_pairs | {bond_key},
+                    pool=pool,
+                    subgraph_id=child_a_id,
+                    parent_id=subgraph_id,
+                    id_counter=child_counter,
+                    progress=progress,
+                )
+                result_b = _solve_subgraph(
+                    mol,
+                    comp_b,
+                    all_pairwise_bond_angles,
+                    all_bond_indices,
+                    all_bond_lengths,
+                    csr_adj_matrix,
+                    log_subgraph,
+                    free_bond_pairs=free_bond_pairs | {bond_key},
+                    pool=pool,
+                    subgraph_id=child_b_id,
+                    parent_id=subgraph_id,
+                    id_counter=child_counter,
+                    progress=progress,
+                )
+            except ValueError:
+                continue
+
+            bond_order_a = _get_bond_order_from_result(result_a, bond_key)
+            bond_order_b = _get_bond_order_from_result(result_b, bond_key)
+            if bond_order_a is not None and bond_order_a == bond_order_b:
+                if estimated_leaf_count is not None:
+                    actual_estimate = (
+                        _estimate_subgraph_leaf_count(comp_a, mol, csr_adj_matrix)
+                        + _estimate_subgraph_leaf_count(comp_b, mol, csr_adj_matrix)
+                    )
+                    _progress_adjust_total(progress, actual_estimate - estimated_leaf_count)
+                return _merge_subgraph_results(result_a, result_b, bond_key)
+
+    if estimated_leaf_count is not None and estimated_leaf_count > 1:
+        _progress_adjust_total(progress, 1 - estimated_leaf_count)
+    _progress_add_total(progress, 1)
+    result = _solve_subgraph_leaf(
+        mol,
+        subgraph,
+        all_pairwise_bond_angles,
+        all_bond_indices,
+        all_bond_lengths,
+        csr_adj_matrix,
+        log_subgraph=log_subgraph,
+        free_bond_pairs=free_bond_pairs,
+        subgraph_id=subgraph_id,
+        parent_id=parent_id,
+    )
+    _progress_update(progress, 1)
+    return result
+
+
+def _solve_subgraph_leaf(
+    mol,
+    subgraph,
+    all_pairwise_bond_angles,
+    all_bond_indices,
+    all_bond_lengths,
+    csr_adj_matrix,
+    log_subgraph=False,
+    free_bond_pairs=None,
+    subgraph_id=None,
+    parent_id=None,
 ):
     try:
         from z3 import Optimize, sat, Solver
@@ -103,19 +249,38 @@ def _solve_subgraph(
         raise ImportError(
             "The z3 package is required for this function. Try to install via 'sudo apt install z3' and 'pip install z3-solver'."
         )
-    if os.environ.get('XB_DEBUG_SAT') == '1':
-        print("Substructure:", [f"{mol.GetAtomWithIdx(i).GetSymbol()}{i}" for i in sorted(subgraph)])
+
+    if free_bond_pairs is None:
+        free_bond_pairs = set()
 
     if log_subgraph:
-        logger.info("Solving subgraph with %s atoms: %s", len(subgraph), sorted(subgraph))
+        logger.debug(
+            "Solving subgraph %s (parent=%s) with %s atoms: %s",
+            subgraph_id,
+            parent_id,
+            len(subgraph),
+            sorted(subgraph),
+        )
 
     softened_atoms, strict_atoms = _resolve_unsat_cores_iteratively(
-        mol, subgraph, all_pairwise_bond_angles, all_bond_indices, all_bond_lengths, csr_adj_matrix
+        mol,
+        subgraph,
+        all_pairwise_bond_angles,
+        all_bond_indices,
+        all_bond_lengths,
+        csr_adj_matrix,
+        free_bond_pairs=free_bond_pairs,
     )
 
     formula, objective, variable_dict, named_constraints = _construct_SMT_formulation(
-        mol, subgraph, all_pairwise_bond_angles, all_bond_indices, all_bond_lengths, csr_adj_matrix,
-        excluded_atoms=softened_atoms
+        mol,
+        subgraph,
+        all_pairwise_bond_angles,
+        all_bond_indices,
+        all_bond_lengths,
+        csr_adj_matrix,
+        excluded_atoms=softened_atoms,
+        free_bond_pairs=free_bond_pairs,
     )
 
     s = Solver()
@@ -145,7 +310,12 @@ def _solve_subgraph(
     new_bond_orders, assigned_charges = _decode_solution(model)
 
     if log_subgraph:
-        logger.info("Solved subgraph with %s atoms", len(subgraph))
+        logger.debug(
+            "Solved subgraph %s (parent=%s) with %s atoms",
+            subgraph_id,
+            parent_id,
+            len(subgraph),
+        )
     return subgraph, softened_atoms, new_bond_orders, assigned_charges
 
 def _get_atom_statistics(atoms, mol):
@@ -202,6 +372,10 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
     if verbose: logger.info(f"Determining connected subgraphs for {len(expanded_atom_indices)} atoms")
     connected_subgraphs = _get_connected_subgraphs(csr_adj_matrix, expanded_atom_indices)
     if verbose: logger.info(f"Found {len(connected_subgraphs)} connected subgraphs")
+    subgraph_id_counter = count()
+    subgraph_entries = [
+        (subgraph, next(subgraph_id_counter), None) for subgraph in connected_subgraphs
+    ]
     new_mol = Chem.RWMol(mol)
     try:
         if verbose: logger.info("Solving subgraphs...")
@@ -215,6 +389,7 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
         use_parallel = len(connected_subgraphs) > 1
         processes = _get_parallel_processes()
         if use_parallel and processes > 1:
+            if verbose: logger.info("Using parallel processing with %s processes for SAT solving", processes)
             try:
                 log_queue = None
                 log_listener = None
@@ -234,26 +409,65 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
                         verbose,
                     ),
                 ) as pool:
+                    results = []
+                    async_results = []
+                    progress = None
                     if _tqdm:
-                        results = list(
-                            _tqdm(
-                                pool.imap_unordered(_solve_subgraph_worker, connected_subgraphs, chunksize=1),
-                                total=len(connected_subgraphs),
-                                desc="Solving subgraphs",
-                                unit="subgraph",
-                            )
+                        estimated_total = sum(
+                            _estimate_subgraph_leaf_count(subgraph, mol, csr_adj_matrix)
+                            for subgraph, _, _ in subgraph_entries
                         )
-                    else:
-                        results = pool.map(_solve_subgraph_worker, connected_subgraphs)
+                        progress = _tqdm(
+                            total=estimated_total,
+                            desc="Solving subgraphs",
+                            unit="subgraph",
+                        )
+                        progress._xb_total_mode = "estimated"
+                    for subgraph, subgraph_id, parent_id in subgraph_entries:
+                        if len(subgraph) > _MIN_SUBGRAPH_SIZE:
+                            results.append(
+                                _solve_subgraph(
+                                    mol,
+                                    subgraph,
+                                    all_pairwise_bond_angles,
+                                    all_bond_indices,
+                                    bond_lengths,
+                                    csr_adj_matrix,
+                                    verbose,
+                                    free_bond_pairs=set(),
+                                    pool=pool,
+                                    subgraph_id=subgraph_id,
+                                    parent_id=parent_id,
+                                    id_counter=subgraph_id_counter,
+                                    progress=progress,
+                                )
+                            )
+                        else:
+                            _progress_add_total(progress, 1)
+                            async_results.append(
+                                pool.apply_async(
+                                    _solve_subgraph_worker,
+                                    ((subgraph, frozenset(), subgraph_id, parent_id),),
+                                )
+                            )
+                    for async_result in async_results:
+                        results.append(async_result.get())
+                        _progress_update(progress, 1)
+                    if progress:
+                        progress.close()
             except Exception:
-                subgraph_iter = connected_subgraphs
+                progress = None
                 if _tqdm:
-                    subgraph_iter = _tqdm(
-                        connected_subgraphs,
-                        total=len(connected_subgraphs),
+                    estimated_total = sum(
+                        _estimate_subgraph_leaf_count(subgraph, mol, csr_adj_matrix)
+                        for subgraph, _, _ in subgraph_entries
+                    )
+                    progress = _tqdm(
+                        total=estimated_total,
                         desc="Solving subgraphs",
                         unit="subgraph",
                     )
+                    progress._xb_total_mode = "estimated"
                 results = [
                     _solve_subgraph(
                         mol,
@@ -263,23 +477,33 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
                         bond_lengths,
                         csr_adj_matrix,
                         verbose,
+                        subgraph_id=subgraph_id,
+                        parent_id=parent_id,
+                        id_counter=subgraph_id_counter,
+                        progress=progress,
                     )
-                    for subgraph in subgraph_iter
+                    for subgraph, subgraph_id, parent_id in subgraph_entries
                 ]
+                if progress:
+                    progress.close()
             finally:
                 if log_listener:
                     log_listener.stop()
                 if log_queue:
                     log_queue.close()
         else:
-            subgraph_iter = connected_subgraphs
+            progress = None
             if _tqdm:
-                subgraph_iter = _tqdm(
-                    connected_subgraphs,
-                    total=len(connected_subgraphs),
+                estimated_total = sum(
+                    _estimate_subgraph_leaf_count(subgraph, mol, csr_adj_matrix)
+                    for subgraph, _, _ in subgraph_entries
+                )
+                progress = _tqdm(
+                    total=estimated_total,
                     desc="Solving subgraphs",
                     unit="subgraph",
                 )
+                progress._xb_total_mode = "estimated"
             results = [
                 _solve_subgraph(
                     mol,
@@ -289,10 +513,26 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
                     bond_lengths,
                     csr_adj_matrix,
                     verbose,
+                    subgraph_id=subgraph_id,
+                    parent_id=parent_id,
+                    id_counter=subgraph_id_counter,
+                    progress=progress,
                 )
-                for subgraph in subgraph_iter
+                for subgraph, subgraph_id, parent_id in subgraph_entries
             ]
-
+            if progress:
+                progress.close()
+        if verbose:
+            logging.info(f"Solved {len(results)} subgraphs")
+            logging.info(f"Assigning bond orders and charges to the molecule:")
+            try:
+                from tqdm import tqdm as _tqdm
+            except ImportError:
+                _tqdm = None
+        if _tqdm:
+            results = list(_tqdm(results, total=len(results), desc="Assigning bond orders and charges", unit="subgraph"))
+        else:
+            results = list(results)
         for subgraph, softened_atoms, new_bond_orders, assigned_charges in results:
             # Print only assignments relevant to softened atoms (only if any softened)
             if softened_atoms:
@@ -481,6 +721,7 @@ def _construct_SMT_formulation(
     angle_tolerance=20,
     enable_atom_activation=False,
     excluded_atoms=None,
+    free_bond_pairs=None,
 ):
     try:
         from z3 import Or, And, Int, RealVal, Sum, Solver, Implies, IntVal, Bool, BoolVal
@@ -490,10 +731,28 @@ def _construct_SMT_formulation(
     considered_atoms = [mol.GetAtomWithIdx(idx) for idx in indices]
     penalty_expressions = [RealVal(0)]
 
-    bond_length_lookup = {
-        (int(idx1), int(idx2)): float(length)
-        for (idx1, idx2), length in zip(bond_indices, bond_lengths)
-    }
+    bond_length_lookup = {}
+    for (idx1, idx2), length in zip(bond_indices, bond_lengths):
+        key = (int(idx1), int(idx2))
+        bond_length_lookup[key] = float(length)
+        bond_length_lookup[(key[1], key[0])] = float(length)
+
+    if free_bond_pairs is None:
+        free_bond_pairs = set()
+
+    def _activation_condition(atom1_idx, atom2_idx):
+        if not enable_atom_activation:
+            return None
+        conditions = []
+        if atom1_idx in atom_activation_vars:
+            conditions.append(atom_activation_vars[atom1_idx])
+        if atom2_idx in atom_activation_vars:
+            conditions.append(atom_activation_vars[atom2_idx])
+        if not conditions:
+            return None
+        if len(conditions) == 1:
+            return conditions[0]
+        return And(*conditions)
     
     # Atom activation variables for unsat core analysis
     atom_activation_vars = {}
@@ -526,6 +785,7 @@ def _construct_SMT_formulation(
             bond = mol.GetBondBetweenAtoms(int(atom1_idx), int(atom2_idx))
             if bond is None:
                 continue
+            bond_is_free = bond_key in free_bond_pairs
             if atom1_idx in indices_set and atom2_idx in indices_set:
                 # bond order = 0 => no bond between the atoms
                 for bond_order in range(4):
@@ -574,6 +834,42 @@ def _construct_SMT_formulation(
                     else:
                         constraint = base_constraint
                         constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}"
+                bond_order_exclusivity.append(constraint)
+                named_constraints[constraint_name] = constraint
+            elif bond_is_free and (atom1_idx in indices_set or atom2_idx in indices_set):
+                # Allow bond order to vary even if only one atom is in indices.
+                for bond_order in range(4):
+                    bond_order = float(bond_order)
+                    symbol = Int(f"bond_order_{atom1_idx}_{atom2_idx}_{bond_order}")
+                    bond_order_variables[(atom1_idx, atom2_idx, bond_order)] = symbol
+                    bond_order_variables[(atom2_idx, atom1_idx, bond_order)] = symbol
+                    base_bool = Or(symbol == 0, symbol == 1)
+                    activation_cond = _activation_condition(atom1_idx, atom2_idx)
+                    if activation_cond is not None:
+                        bool_constraint = Implies(activation_cond, base_bool)
+                        bool_name = f"bool_bond_{atom1_idx}_{atom2_idx}_{int(bond_order)}_conditional"
+                    else:
+                        bool_constraint = base_bool
+                        bool_name = f"bool_bond_{atom1_idx}_{atom2_idx}_{int(bond_order)}"
+                    bond_order_is_bool.append(bool_constraint)
+                    named_constraints[bool_name] = bool_constraint
+                    if bond_order > 0:
+                        bond_length = bond_length_lookup.get((atom1_idx, atom2_idx))
+                        if bond_length is None:
+                            continue
+                        ideal_bond_length = ideal_bond_lengths[atom.GetSymbol()][neighbor.GetSymbol()][ideal_bond_length_order_indices[bond_order]]
+                        penalty_expressions.append((ideal_bond_length - bond_length) * symbol)
+                    else:
+                        penalty_expressions.append(10 * symbol)
+
+                base_constraint = Sum([bond_order_variables[(atom1_idx, atom2_idx, bond_order)] for bond_order in range(4)]) == 1
+                activation_cond = _activation_condition(atom1_idx, atom2_idx)
+                if activation_cond is not None:
+                    constraint = Implies(activation_cond, base_constraint)
+                    constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}_conditional"
+                else:
+                    constraint = base_constraint
+                    constraint_name = f"bond_exclusivity_{atom1_idx}_{atom2_idx}"
                 bond_order_exclusivity.append(constraint)
                 named_constraints[constraint_name] = constraint
             elif atom1_idx in indices_set or atom2_idx in indices_set:
@@ -759,6 +1055,7 @@ def _resolve_unsat_cores_iteratively(
     bond_indices,
     bond_lengths,
     csr_adj_matrix,
+    free_bond_pairs=None,
 ):
     """
     Iteratively resolve unsat cores by softening constraints for problematic atoms until SAT is achieved.
@@ -783,6 +1080,7 @@ def _resolve_unsat_cores_iteratively(
             csr_adj_matrix,
             enable_atom_activation=True,
             excluded_atoms=softened_atoms,
+            free_bond_pairs=free_bond_pairs,
         )
         
         # Assumption-based SAT check so unsat core contains only atom activations
@@ -862,6 +1160,104 @@ def _get_connected_subgraphs(csr_adj_matrix, indices):
     for pos, label in enumerate(labels):
         components[label].add(indices_list[pos])
     return components
+
+
+def _iter_cc_bridge_splits(subgraph, mol, csr_adj_matrix):
+    indices_set = set(subgraph)
+    if len(indices_set) <= _MIN_SUBGRAPH_SIZE:
+        return []
+
+    adjacency = {idx: [] for idx in indices_set}
+    for idx in indices_set:
+        adjacency[idx] = [int(nbr) for nbr in csr_adj_matrix[idx].indices if nbr in indices_set]
+
+    time = 0
+    disc = {}
+    low = {}
+    parent = {}
+    bridges = []
+
+    def dfs(u):
+        nonlocal time
+        time += 1
+        disc[u] = low[u] = time
+        for v in adjacency[u]:
+            if v not in disc:
+                parent[v] = u
+                dfs(v)
+                low[u] = min(low[u], low[v])
+                if low[v] > disc[u]:
+                    bridges.append((u, v))
+            elif v != parent.get(u):
+                low[u] = min(low[u], disc[v])
+
+    for node in indices_set:
+        if node not in disc:
+            dfs(node)
+
+    candidates = []
+    for u, v in bridges:
+        if mol.GetAtomWithIdx(u).GetSymbol() != "C" or mol.GetAtomWithIdx(v).GetSymbol() != "C":
+            continue
+        comp_a = _component_without_edge(adjacency, u, v)
+        if not comp_a:
+            continue
+        comp_b = indices_set - comp_a
+        if not comp_b:
+            continue
+        diff = abs(len(comp_a) - len(comp_b))
+        bond_key = (min(u, v), max(u, v))
+        candidates.append((diff, bond_key, comp_a, comp_b))
+
+    candidates.sort(key=lambda item: item[0])
+    return [(bond_key, comp_a, comp_b) for _, bond_key, comp_a, comp_b in candidates]
+
+
+def _component_without_edge(adjacency, start, blocked_neighbor):
+    visited = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node in visited:
+            continue
+        visited.add(node)
+        for nbr in adjacency[node]:
+            if (node == start and nbr == blocked_neighbor) or (node == blocked_neighbor and nbr == start):
+                continue
+            if nbr not in visited:
+                stack.append(nbr)
+    return visited
+
+
+def _get_bond_order_from_result(result, bond_key):
+    _, _, new_bond_orders, _ = result
+    atom1, atom2 = bond_key
+    if (atom1, atom2) in new_bond_orders:
+        return new_bond_orders[(atom1, atom2)]
+    if (atom2, atom1) in new_bond_orders:
+        return new_bond_orders[(atom2, atom1)]
+    return None
+
+
+def _merge_subgraph_results(result_a, result_b, bond_key):
+    subgraph_a, softened_a, bond_orders_a, charges_a = result_a
+    subgraph_b, softened_b, bond_orders_b, charges_b = result_b
+
+    merged_bond_orders = dict(bond_orders_a)
+    for key, value in bond_orders_b.items():
+        if key in merged_bond_orders and merged_bond_orders[key] != value:
+            raise ValueError(f"Conflicting bond order for {key}: {merged_bond_orders[key]} vs {value}")
+        merged_bond_orders[key] = value
+
+    merged_charges = dict(charges_a)
+    for key, value in charges_b.items():
+        if key in merged_charges and merged_charges[key] != value:
+            raise ValueError(f"Conflicting charge for atom {key}: {merged_charges[key]} vs {value}")
+        merged_charges[key] = value
+
+    merged_subgraph = set(subgraph_a) | set(subgraph_b)
+    merged_softened = set(softened_a) | set(softened_b)
+    return merged_subgraph, merged_softened, merged_bond_orders, merged_charges
 
 def _get_all_pairwise_bond_angles(mol):
     positions = position(mol)
