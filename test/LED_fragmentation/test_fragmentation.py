@@ -9,12 +9,18 @@ logging.basicConfig(
 )
 
 def test_fragmentation():
-    mol = next(rdutil.read_molecules("larger_test_case.xyz", verbose = True))
-    rdutil.write_molecules([mol], "larger_test_case_connected.sdf")
-    frags = fragment_molecule(mol, 1519)
+    # mol = next(rdutil.read_molecules("larger_test_case.xyz", verbose = True))
+    # rdutil.write_molecules([mol], "larger_test_case_connected.sdf")
+    mol = next(rdutil.read_molecules("larger_test_case_connected.sdf"))
+    frags = fragment_molecule(mol, 9329, verbose = True)
+    all_indices = set()
+    for frag in frags:
+        all_indices.update(frag)
+    remaining_mol = rdutil.keep_atoms(mol, all_indices)
+    rdutil.write_molecules([remaining_mol], "larger_test_case_remaining.sdf")
     i = 0
     for frag in frags:
-        pmv.Points(rdutil.position(mol)[frag]).write(f"test/LED_fragmentation/frag_{i}.py")
+        pmv.Points(rdutil.position(mol)[frag], name = f"frag_{i}").write(f"frag_{i}.py")
         i += 1
 
 if __name__ == "__main__":

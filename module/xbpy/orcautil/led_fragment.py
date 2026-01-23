@@ -2,8 +2,11 @@ from scipy.spatial import cKDTree
 from rdkit.Chem import AllChem as Chem
 from ..rdutil import position
 from ..rdutil import get_connected_component_indices
+import logging
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
-def fragment_molecule(mol, center_atom_index):
+def fragment_molecule(mol, center_atom_index, verbose = False):
     """
     Assumes the molecule is already proximity bonded.
     """
@@ -13,6 +16,8 @@ def fragment_molecule(mol, center_atom_index):
         if center_atom_index in component_indices:
             center_component_indices = component_indices
             break
+    if verbose:
+        logger.info(f"Found center component {center_component_indices}")
     if center_component_indices is None:
         raise ValueError(f"Center atom index {center_atom_index} not found in molecule")
 
@@ -20,12 +25,16 @@ def fragment_molecule(mol, center_atom_index):
 
     # extend surrounding indices to next C-C bond.
     all_used_components = []
+    all_to_replace = []
     for component_indices in all_components:
         current_selected = set(component_indices).intersection(surrounding_indices)
-        current_selected = extend_connected_indices(mol, current_selected, component_indices)
-        all_used_components.append(current_selected)
-
-    return all_used_components
+        current_selected, to_replace = extend_connected_indices(mol, current_selected, component_indices)
+        if len(current_selected) != 0:
+            all_used_components.append(current_selected)
+            if verbose:
+                logger.info(f"Extended component {len(component_indices)} to {len(current_selected)}")
+            all_to_replace.extend(to_replace)
+    return all_used_components, list(set(all_to_replace))
 
 def get_surrounding_indices(mol, center_indices, radius = 5):
     positions = position(mol)
@@ -38,13 +47,33 @@ def extend_connected_indices(mol, indices, component_indices):
     """ Extends the indices within the connected component of the given indices to the next C-C bond."""
     to_check = list(indices)
     seen = set(indices)
+
+    # heavy atom check
     while to_check:
         index = to_check.pop()
         for neighbor in mol.GetAtomWithIdx(index).GetNeighbors():
             neighbor_index = neighbor.GetIdx()
+            neighbor_symbol = mol.GetAtomWithIdx(neighbor_index).GetSymbol()
+            index_symbol = mol.GetAtomWithIdx(index).GetSymbol()
             single_bond = mol.GetBondBetweenAtoms(index, neighbor_index).GetBondType() == Chem.rdchem.BondType.SINGLE
-            both_carbon = mol.GetAtomWithIdx(index).GetSymbol() == "C" and mol.GetAtomWithIdx(neighbor_index).GetSymbol() == "C"
-            seen.add(neighbor_index)
-            if not(single_bond and both_carbon):
+            both_carbon = (index_symbol == "C") and (neighbor_symbol == "C")
+            if (not(single_bond and both_carbon)) and not(neighbor_index in seen):
                 to_check.append(neighbor_index)
-    return list(seen)
+            seen.add(neighbor_index)
+
+    # add any hydrogen neighbors
+    new_seen = set()
+    for index in seen:
+        for neighbor in mol.GetAtomWithIdx(index).GetNeighbors():
+            neighbor_index = neighbor.GetIdx()
+            if neighbor.GetAtomicNum() == 1:
+                new_seen.add(neighbor_index)
+    to_replace = set()
+    for index in seen:
+        for neighbor in mol.GetAtomWithIdx(index).GetNeighbors():
+            neighbor_index = neighbor.GetIdx()
+            if neighbor_index not in seen:
+                if neighbor.GetAtomicNum() != 1:
+                    to_replace.add((index, neighbor_index))
+    seen.update(new_seen)
+    return list(seen), list(to_replace)

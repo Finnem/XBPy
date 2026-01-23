@@ -151,17 +151,17 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     if os.path.splitext(path)[1] == ".pdb":
         if not "flavor" in kwargs:
             kwargs["flavor"] = 4
-        molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, verbose=verbose, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromPDBFile(path, proximityBonding=proximityBonding, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol2":
-        molecules = [Chem.rdmolfiles.MolFromMol2File(path, verbose=verbose, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromMol2File(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".mol":
-        molecules = [Chem.rdmolfiles.MolFromMolFile(path, verbose=verbose, *args, **kwargs)]
+        molecules = [Chem.rdmolfiles.MolFromMolFile(path, *args, **kwargs)]
     elif os.path.splitext(path)[1] == ".sdf":
-        molecules = Chem.rdmolfiles.SDMolSupplier(path, strictParsing= False, verbose=verbose, *args, **kwargs)
+        molecules = Chem.rdmolfiles.SDMolSupplier(path, strictParsing= False, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".mae":
-        molecules = Chem.rdmolfiles.MaeMolSupplier(path, verbose=verbose, *args, **kwargs)
+        molecules = Chem.rdmolfiles.MaeMolSupplier(path, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".maegz":
-        molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), verbose=verbose, *args, **kwargs)
+        molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
         molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
     else:

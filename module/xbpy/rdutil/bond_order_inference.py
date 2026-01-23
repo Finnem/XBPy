@@ -525,14 +525,7 @@ def correct_bond_orders(mol, add_hydrogens = False, try_full = True, verbose = F
         if verbose:
             logging.info(f"Solved {len(results)} subgraphs")
             logging.info(f"Assigning bond orders and charges to the molecule:")
-            try:
-                from tqdm import tqdm as _tqdm
-            except ImportError:
-                _tqdm = None
-        if _tqdm:
-            results = list(_tqdm(results, total=len(results), desc="Assigning bond orders and charges", unit="subgraph"))
-        else:
-            results = list(results)
+            
         for subgraph, softened_atoms, new_bond_orders, assigned_charges in results:
             # Print only assignments relevant to softened atoms (only if any softened)
             if softened_atoms:
