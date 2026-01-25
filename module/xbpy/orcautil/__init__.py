@@ -5,4 +5,4 @@ from .led_extract import (
     determine_fragment_groups,
     clear_subsystem_cache
 )
-from .led_fragment import fragment_molecule
+from .led_fragment import fragment_molecule, split_fragments_by_peptide_bonds
