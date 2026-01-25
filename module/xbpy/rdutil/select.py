@@ -20,7 +20,8 @@ def match_smarts(mol, smarts):
 
     rordered_matches = []
     for match in matches:
-        rordered_matches.append([match[ind_map[atom_idx + 1]] for atom_idx in range(len(match))])
+        ordered_map_nums = sorted([num for num in ind_map.keys() if num > 0])
+        rordered_matches.append([match[ind_map[map_num]] for map_num in ordered_map_nums])
     return rordered_matches
 
 def get_amide_bonds(mol):

@@ -7,12 +7,12 @@ from collections import defaultdict
 positions_viewport_callbacks = defaultdict(lambda: defaultdict(lambda: ViewportCallback([],0,0)))
 
 
-frag_31 = [
+frag_34 = [
         
-COLOR,0.8028,0.86,0.33999999999999997,1.0,SPHERE,42.470001,72.089996,46.639999,0.3,COLOR,0.8028,0.86,0.33999999999999997,1.0,SPHERE,42.689999,72.449997,47.5,0.3,COLOR,0.8028,0.86,0.33999999999999997,1.0,SPHERE,42.779999,71.18,46.68,0.3
+COLOR,0.33999999999999997,0.86,0.8132000000000001,1.0,SPHERE,45.669998,71.540001,57.0,0.3,COLOR,0.33999999999999997,0.86,0.8132000000000001,1.0,SPHERE,46.299999,71.480003,57.720001,0.3,COLOR,0.33999999999999997,0.86,0.8132000000000001,1.0,SPHERE,45.439999,70.629997,56.82,0.3
 
             ]
-cmd.load_cgo(frag_31, "frag_31", state=1)
+cmd.load_cgo(frag_34, "frag_34", state=1)
         
 
 for x in positions_viewport_callbacks:

@@ -96,12 +96,28 @@ def keep_atoms(mol, atoms, rebuild_threshold=1000, disable_rebuild=False, saniti
         hybridizations = [str(mol.GetAtomWithIdx(idx).GetHybridization()) for idx in kept_indices]
         bond_indices = []
         bond_orders = []
-        for bond in mol.GetBonds():
-            a1 = bond.GetBeginAtomIdx()
-            a2 = bond.GetEndAtomIdx()
-            if a1 in indices and a2 in indices:
-                bond_indices.append((index_map[a1], index_map[a2]))
-                bond_orders.append(bond.GetBondType())
+        kept_bonds = []
+        # Prefer neighbor traversal when keeping a small subset of atoms
+        if len(indices) < max(2000, int(0.2 * mol.GetNumAtoms())):
+            for old_idx in kept_indices:
+                atom = mol.GetAtomWithIdx(old_idx)
+                for neighbor in atom.GetNeighbors():
+                    neighbor_idx = neighbor.GetIdx()
+                    if neighbor_idx in indices and neighbor_idx > old_idx:
+                        bond = mol.GetBondBetweenAtoms(int(old_idx), int(neighbor_idx))
+                        if bond is None:
+                            continue
+                        bond_indices.append((index_map[old_idx], index_map[neighbor_idx]))
+                        bond_orders.append(bond.GetBondType())
+                        kept_bonds.append(bond)
+        else:
+            for bond in mol.GetBonds():
+                a1 = bond.GetBeginAtomIdx()
+                a2 = bond.GetEndAtomIdx()
+                if a1 in indices and a2 in indices:
+                    bond_indices.append((index_map[a1], index_map[a2]))
+                    bond_orders.append(bond.GetBondType())
+                    kept_bonds.append(bond)
         new_mol = build_molecule(
             positions,
             elements,
@@ -123,24 +139,23 @@ def keep_atoms(mol, atoms, rebuild_threshold=1000, disable_rebuild=False, saniti
                 new_atom.SetChiralTag(old_atom.GetChiralTag())
                 new_atom.SetNoImplicit(old_atom.GetNoImplicit())
                 new_atom.SetIsAromatic(old_atom.GetIsAromatic())
-            for bond in mol.GetBonds():
+            for bond in kept_bonds:
                 a1 = bond.GetBeginAtomIdx()
                 a2 = bond.GetEndAtomIdx()
-                if a1 in indices and a2 in indices:
-                    new_bond = new_mol.GetBondBetweenAtoms(index_map[a1], index_map[a2])
-                    if new_bond is None:
-                        continue
-                    new_bond.SetIsAromatic(bond.GetIsAromatic())
-                    new_bond.SetBondDir(bond.GetBondDir())
-                    new_bond.SetStereo(bond.GetStereo())
-                    stereo_atoms = bond.GetStereoAtoms()
-                    if stereo_atoms and len(stereo_atoms) == 2:
-                        new_bond.SetStereoAtoms(
-                            index_map[stereo_atoms[0]],
-                            index_map[stereo_atoms[1]],
-                        )
-                    for prop_name in bond.GetPropNames():
-                        new_bond.SetProp(prop_name, bond.GetProp(prop_name))
+                new_bond = new_mol.GetBondBetweenAtoms(index_map[a1], index_map[a2])
+                if new_bond is None:
+                    continue
+                new_bond.SetIsAromatic(bond.GetIsAromatic())
+                new_bond.SetBondDir(bond.GetBondDir())
+                new_bond.SetStereo(bond.GetStereo())
+                stereo_atoms = bond.GetStereoAtoms()
+                if stereo_atoms and len(stereo_atoms) == 2:
+                    new_bond.SetStereoAtoms(
+                        index_map[stereo_atoms[0]],
+                        index_map[stereo_atoms[1]],
+                    )
+                for prop_name in bond.GetPropNames():
+                    new_bond.SetProp(prop_name, bond.GetProp(prop_name))
         except Exception:
             pass
         return new_mol
