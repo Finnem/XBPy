@@ -12,7 +12,13 @@ import logging
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
-def fragment_molecule(mol, center_atom_index, verbose = False, filter_occluded_fragments=True):
+def fragment_molecule(
+    mol,
+    center_atom_index,
+    verbose=False,
+    filter_occluded_fragments=True,
+    additional_indices=None,
+):
     """
     Assumes the molecule is already proximity bonded.
     """
@@ -32,6 +38,8 @@ def fragment_molecule(mol, center_atom_index, verbose = False, filter_occluded_f
 
     t0 = time.perf_counter()
     surrounding_indices = get_surrounding_indices(mol, center_component_indices)
+    if additional_indices:
+        surrounding_indices = list(set(surrounding_indices).union(set(additional_indices)))
     if verbose:
         logger.info(f"Surrounding indices: {len(surrounding_indices)} in {time.perf_counter() - t0:.3f}s")
 
@@ -67,7 +75,11 @@ def fragment_molecule(mol, center_atom_index, verbose = False, filter_occluded_f
     if filter_occluded_fragments:
         t0 = time.perf_counter()
         split_fragments = _filter_fragments_by_occlusion(
-            mol, split_fragments, center_atom_index, verbose=verbose
+            mol,
+            split_fragments,
+            center_atom_index,
+            additional_indices=additional_indices,
+            verbose=verbose,
         )
         if verbose:
             logger.info(f"Occlusion filter: {len(split_fragments)} in {time.perf_counter() - t0:.3f}s")
@@ -101,7 +113,9 @@ def _compute_replacement_pairs(mol, frags):
                     to_replace.add((idx, neighbor_idx))
     return list(to_replace)
 
-def _filter_fragments_by_occlusion(mol, fragments, center_atom_index, verbose=False):
+def _filter_fragments_by_occlusion(
+    mol, fragments, center_atom_index, additional_indices=None, verbose=False
+):
     central_frag = None
     for frag in fragments:
         if center_atom_index in frag:
@@ -119,10 +133,14 @@ def _filter_fragments_by_occlusion(mol, fragments, center_atom_index, verbose=Fa
     for frag in fragments:
         all_frag_atoms.update(frag)
 
+    additional_set = set(additional_indices or [])
     kept = []
     removed = 0
     for frag in fragments:
         if frag is central_frag:
+            kept.append(frag)
+            continue
+        if additional_set.intersection(frag):
             kept.append(frag)
             continue
         frag_atoms = [mol.GetAtomWithIdx(int(i)) for i in frag]

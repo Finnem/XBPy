@@ -14,7 +14,7 @@ def test_fragmentation():
     #mol = next(rdutil.read_molecules("larger_test_case.xyz"))
     #rdutil.write_molecules([mol], "larger_test_case_connected.sdf")
     mol = next(rdutil.read_molecules("larger_test_case_connected.sdf"))
-    cutout_mol, frags = fragment_molecule(mol, 9329, verbose = True)
+    cutout_mol, frags = fragment_molecule(mol, 9329, verbose = True, additional_indices = [74198])
     rdutil.write_molecules([cutout_mol], "larger_test_case_cutout.sdf")
     i = 0
     for frag in frags:
