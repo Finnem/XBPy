@@ -62,13 +62,16 @@ def create_query_mol(mol):
         bond.SetBondType(Chem.BondType.UNSPECIFIED)
     return mol
 
-def keep_atoms(mol, atoms):
+def keep_atoms(mol, atoms, rebuild_threshold=1000, disable_rebuild=False, sanitize_rebuild=False):
     """Remove all atoms except the given atoms from the molecule.
     
     Args:
         mol (RDKit.Mol): Molecule to remove the atoms from.
         atoms (list(RDKit.Atom or int)): List of atoms to keep. If list of ints, the atoms with the given indices will be kept.
             Passing indices will generally be faster.
+        rebuild_threshold (int): If the molecule has at least this many atoms, rebuild from kept atoms for speed.
+        disable_rebuild (bool): Defaults to False. If True, always use removal instead of reconstruction.
+        sanitize_rebuild (bool): Defaults to False. If True, sanitize the rebuilt molecule.
             
     Returns:
         RDKit.Mol: Molecule with all atoms except the given atoms removed.
@@ -82,7 +85,72 @@ def keep_atoms(mol, atoms):
         else:
             indices.add(atom.GetIdx())
     to_remove = all_atom_indices - indices
-    return remove_atoms(mol, to_remove)
+    if (not disable_rebuild) and mol.GetNumAtoms() >= rebuild_threshold:
+        kept_indices = sorted(indices)
+        if not kept_indices:
+            return Chem.Mol()
+        index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(kept_indices)}
+        positions = position(mol)[kept_indices]
+        elements = [mol.GetAtomWithIdx(idx).GetSymbol() for idx in kept_indices]
+        formal_charges = [mol.GetAtomWithIdx(idx).GetFormalCharge() for idx in kept_indices]
+        hybridizations = [str(mol.GetAtomWithIdx(idx).GetHybridization()) for idx in kept_indices]
+        bond_indices = []
+        bond_orders = []
+        for bond in mol.GetBonds():
+            a1 = bond.GetBeginAtomIdx()
+            a2 = bond.GetEndAtomIdx()
+            if a1 in indices and a2 in indices:
+                bond_indices.append((index_map[a1], index_map[a2]))
+                bond_orders.append(bond.GetBondType())
+        new_mol = build_molecule(
+            positions,
+            elements,
+            bond_indices,
+            bond_orders,
+            formal_charges=formal_charges,
+            hybridizations=hybridizations,
+            sanitize=sanitize_rebuild,
+        )
+        try:
+            copy_props(mol, new_mol)
+            for old_idx, new_idx in index_map.items():
+                old_atom = mol.GetAtomWithIdx(old_idx)
+                new_atom = new_mol.GetAtomWithIdx(new_idx)
+                for prop_name in old_atom.GetPropNames():
+                    new_atom.SetProp(prop_name, old_atom.GetProp(prop_name))
+                new_atom.SetAtomMapNum(old_atom.GetAtomMapNum())
+                new_atom.SetIsotope(old_atom.GetIsotope())
+                new_atom.SetChiralTag(old_atom.GetChiralTag())
+                new_atom.SetNoImplicit(old_atom.GetNoImplicit())
+                new_atom.SetIsAromatic(old_atom.GetIsAromatic())
+            for bond in mol.GetBonds():
+                a1 = bond.GetBeginAtomIdx()
+                a2 = bond.GetEndAtomIdx()
+                if a1 in indices and a2 in indices:
+                    new_bond = new_mol.GetBondBetweenAtoms(index_map[a1], index_map[a2])
+                    if new_bond is None:
+                        continue
+                    new_bond.SetIsAromatic(bond.GetIsAromatic())
+                    new_bond.SetBondDir(bond.GetBondDir())
+                    new_bond.SetStereo(bond.GetStereo())
+                    stereo_atoms = bond.GetStereoAtoms()
+                    if stereo_atoms and len(stereo_atoms) == 2:
+                        new_bond.SetStereoAtoms(
+                            index_map[stereo_atoms[0]],
+                            index_map[stereo_atoms[1]],
+                        )
+                    for prop_name in bond.GetPropNames():
+                        new_bond.SetProp(prop_name, bond.GetProp(prop_name))
+        except Exception:
+            pass
+        return new_mol
+    # Default path: remove atoms in-place (fast for smaller molecules)
+    rw = Chem.RWMol(mol)
+    rw.BeginBatchEdit()
+    for idx in sorted(to_remove, reverse=True):
+        rw.RemoveAtom(int(idx))
+    rw.CommitBatchEdit()
+    return rw.GetMol()
 
 ideal_tetraheder = np.array([[0,0,0], [0.0, 0.0, 1.0], [0.0, 0.8944271909999159, -0.4472135954999579], [-0.816496580927726, -0.408248290463863, -0.408248290463863], [0.816496580927726, -0.408248290463863, -0.408248290463863]])
 
@@ -219,7 +287,7 @@ def build_molecule(positions, elements, bond_indices, bond_orders, formal_charge
         
         mol.AddAtom(atom)
     
-    # Map bond order strings to RDKit bond types
+    # Map bond order representations to RDKit bond types
     bond_order_mapping = {
         "SINGLE": Chem.BondType.SINGLE,
         "DOUBLE": Chem.BondType.DOUBLE,
@@ -230,7 +298,21 @@ def build_molecule(positions, elements, bond_indices, bond_orders, formal_charge
     
     # Add bonds to the molecule
     for (start_idx, end_idx), bond_order in zip(bond_indices, bond_orders):
-        bond_type = bond_order_mapping.get(bond_order, Chem.BondType.SINGLE)
+        if isinstance(bond_order, Chem.BondType):
+            bond_type = bond_order
+        elif np.issubdtype(type(bond_order), np.number):
+            if float(bond_order) == 1.0:
+                bond_type = Chem.BondType.SINGLE
+            elif float(bond_order) == 2.0:
+                bond_type = Chem.BondType.DOUBLE
+            elif float(bond_order) == 3.0:
+                bond_type = Chem.BondType.TRIPLE
+            elif float(bond_order) == 1.5:
+                bond_type = Chem.BondType.AROMATIC
+            else:
+                bond_type = Chem.BondType.SINGLE
+        else:
+            bond_type = bond_order_mapping.get(bond_order, Chem.BondType.SINGLE)
         mol.AddBond(int(start_idx), int(end_idx), bond_type)
     
     # Create a conformer and set atom positions
