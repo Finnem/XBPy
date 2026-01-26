@@ -14,12 +14,12 @@ def test_fragmentation():
     #mol = next(rdutil.read_molecules("larger_test_case.xyz"))
     #rdutil.write_molecules([mol], "larger_test_case_connected.sdf")
     mol = next(rdutil.read_molecules("larger_test_case_connected.sdf"))
-    cutout_mol, frags = fragment_molecule(mol, 9329, verbose = True, additional_indices = [74198])
+    cutout_mol, frags, split_covalent_bonds = fragment_molecule(mol, 9329, verbose = True, additional_indices = [74198])
     rdutil.write_molecules([cutout_mol], "larger_test_case_cutout.sdf")
     i = 0
     for frag in frags:
         pmv.Points(rdutil.position(cutout_mol)[frag], name = f"frag_{i}").write(f"frag_{i}.py")
         i += 1
-
+    print(split_covalent_bonds)
 if __name__ == "__main__":
     test_fragmentation()

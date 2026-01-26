@@ -1,5 +1,4 @@
 from scipy.spatial import cKDTree
-import time
 import numpy as np
 from rdkit.Chem import AllChem as Chem
 from rdkit.Chem import rdmolops
@@ -22,10 +21,9 @@ def fragment_molecule(
     """
     Assumes the molecule is already proximity bonded.
     """
-    t0 = time.perf_counter()
     all_components = get_connected_component_indices(mol)
     if verbose:
-        logger.info(f"Connected components: {len(all_components)} in {time.perf_counter() - t0:.3f}s")
+        logger.info(f"Connected components: {len(all_components)}")
     center_component_indices = None
     for component_indices in all_components:
         if center_atom_index in component_indices:
@@ -36,12 +34,11 @@ def fragment_molecule(
     if center_component_indices is None:
         raise ValueError(f"Center atom index {center_atom_index} not found in molecule")
 
-    t0 = time.perf_counter()
     surrounding_indices = get_surrounding_indices(mol, center_component_indices)
     if additional_indices:
         surrounding_indices = list(set(surrounding_indices).union(set(additional_indices)))
     if verbose:
-        logger.info(f"Surrounding indices: {len(surrounding_indices)} in {time.perf_counter() - t0:.3f}s")
+        logger.info(f"Surrounding indices: {len(surrounding_indices)}")
 
     # extend surrounding indices to next C-C bond.
     all_used_components = []
@@ -53,7 +50,6 @@ def fragment_molecule(
     except Exception:
         ring_info = None
 
-    t0 = time.perf_counter()
     for component_indices in all_components:
         current_selected = set(component_indices).intersection(surrounding_indices)
         current_selected, to_replace = extend_connected_indices(
@@ -65,15 +61,13 @@ def fragment_molecule(
                 logger.info(f"Extended component {len(component_indices)} to {len(current_selected)}")
             all_to_replace.extend(to_replace)
     if verbose:
-        logger.info(f"Extended components total: {len(all_used_components)} in {time.perf_counter() - t0:.3f}s")
+        logger.info(f"Extended components total: {len(all_used_components)}")
 
-    t0 = time.perf_counter()
     split_fragments = split_fragments_by_peptide_bonds(all_used_components, mol, verbose=verbose)
     if verbose:
-        logger.info(f"Split fragments: {len(split_fragments)} in {time.perf_counter() - t0:.3f}s")
+        logger.info(f"Split fragments: {len(split_fragments)}")
 
     if filter_occluded_fragments:
-        t0 = time.perf_counter()
         split_fragments = _filter_fragments_by_occlusion(
             mol,
             split_fragments,
@@ -82,26 +76,49 @@ def fragment_molecule(
             verbose=verbose,
         )
         if verbose:
-            logger.info(f"Occlusion filter: {len(split_fragments)} in {time.perf_counter() - t0:.3f}s")
+            logger.info(f"Occlusion filter: {len(split_fragments)}")
 
-    t0 = time.perf_counter()
-    to_replace = _compute_replacement_pairs(mol, split_fragments)
+    kept_atoms = set()
+    for frag in split_fragments:
+        kept_atoms.update(frag)
+    to_replace = _compute_replacement_pairs(mol, split_fragments, kept_atoms)
     if verbose:
-        logger.info(f"Replacement pairs: {len(to_replace)} in {time.perf_counter() - t0:.3f}s")
+        logger.info(f"Replacement pairs: {len(to_replace)}")
 
-    t0 = time.perf_counter()
-    cutout_mol, index_map = create_molecule_cutout(mol, split_fragments, to_replace, verbose=verbose)
+    cutout_mol, index_map, added_hydrogens = create_molecule_cutout(
+        mol, split_fragments, to_replace, verbose=verbose
+    )
     if verbose:
-        logger.info(f"Cutout mol atoms: {cutout_mol.GetNumAtoms()} in {time.perf_counter() - t0:.3f}s")
+        logger.info(f"Cutout mol atoms: {cutout_mol.GetNumAtoms()}")
+    split_covalent_bonds = _get_fragment_connection_bonds(mol, split_fragments, index_map)
     split_fragments = [
         sorted(index_map[idx] for idx in frag if idx in index_map)
         for frag in split_fragments
         if frag
     ]
+    if added_hydrogens:
+        atom_to_fragment = {
+            atom_idx: frag_idx
+            for frag_idx, frag in enumerate(split_fragments)
+            for atom_idx in frag
+        }
+        for base_old_idx, h_new_idx in added_hydrogens:
+            base_new_idx = index_map.get(base_old_idx)
+            if base_new_idx is None:
+                continue
+            frag_idx = atom_to_fragment.get(base_new_idx)
+            if frag_idx is None:
+                continue
+            split_fragments[frag_idx].append(h_new_idx)
 
-    return cutout_mol, split_fragments
+    center_new_idx = index_map.get(center_atom_index)
+    cutout_mol, split_fragments, split_covalent_bonds = _reorder_fragments_consecutive(
+        cutout_mol, split_fragments, split_covalent_bonds, center_new_idx
+    )
 
-def _compute_replacement_pairs(mol, frags):
+    return cutout_mol, split_fragments, split_covalent_bonds
+
+def _compute_replacement_pairs(mol, frags, kept_atoms):
     to_replace = set()
     for frag in frags:
         frag_set = set(frag)
@@ -109,9 +126,67 @@ def _compute_replacement_pairs(mol, frags):
             atom = mol.GetAtomWithIdx(int(idx))
             for neighbor in atom.GetNeighbors():
                 neighbor_idx = neighbor.GetIdx()
-                if neighbor_idx not in frag_set and neighbor.GetAtomicNum() != 1:
+                if neighbor_idx not in kept_atoms and neighbor.GetAtomicNum() != 1:
                     to_replace.add((idx, neighbor_idx))
     return list(to_replace)
+
+def _get_fragment_connection_bonds(mol, frags, index_map):
+    atom_to_fragment = {}
+    for frag_idx, frag in enumerate(frags):
+        for atom_idx in frag:
+            atom_to_fragment[int(atom_idx)] = frag_idx
+    connection_bonds = set()
+    for bond in mol.GetBonds():
+        a1 = bond.GetBeginAtomIdx()
+        a2 = bond.GetEndAtomIdx()
+        if a1 not in atom_to_fragment or a2 not in atom_to_fragment:
+            continue
+        if atom_to_fragment[a1] == atom_to_fragment[a2]:
+            continue
+        if a1 in index_map and a2 in index_map:
+            connection_bonds.add(tuple(sorted((index_map[a1], index_map[a2]))))
+    return sorted(connection_bonds)
+
+def _reorder_fragments_consecutive(mol, fragments, covalent_bonds, center_atom_index):
+    ordered_fragments = [sorted(frag) for frag in fragments]
+    center_idx = None
+    if center_atom_index is not None:
+        for i, frag in enumerate(ordered_fragments):
+            if center_atom_index in frag:
+                center_idx = i
+                break
+    center_frag = None
+    if center_idx is not None:
+        center_frag = ordered_fragments.pop(center_idx)
+    new_order = []
+    for frag in ordered_fragments:
+        new_order.extend(frag)
+    total_atoms = mol.GetNumAtoms()
+    if len(new_order) != total_atoms:
+        center_set = set(center_frag or [])
+        new_order_set = set(new_order)
+        remaining = [
+            idx for idx in range(total_atoms)
+            if idx not in new_order_set and idx not in center_set
+        ]
+        if remaining:
+            ordered_fragments.append(remaining)
+            new_order.extend(remaining)
+    if center_frag is not None:
+        ordered_fragments.append(center_frag)
+        new_order.extend(center_frag)
+    index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(new_order)}
+    reordered_mol = Chem.RenumberAtoms(mol, new_order)
+    new_fragments = []
+    offset = 0
+    for frag in ordered_fragments:
+        size = len(frag)
+        new_fragments.append(list(range(offset, offset + size)))
+        offset += size
+    new_covalent_bonds = sorted(
+        tuple(sorted((index_map[a], index_map[b]))) for a, b in covalent_bonds
+    )
+    return reordered_mol, new_fragments, new_covalent_bonds
 
 def _filter_fragments_by_occlusion(
     mol, fragments, center_atom_index, additional_indices=None, verbose=False
@@ -167,15 +242,14 @@ def create_molecule_cutout(mol, frags, to_replace, verbose=False):
     all_indices = set()
     for frag in frags:
         all_indices.update(frag)
-    t0 = time.perf_counter()
     remaining_mol = Chem.RWMol(keep_atoms(mol, all_indices))
     if verbose:
         logger.info(
-            f"keep_atoms: kept {len(all_indices)} / {mol.GetNumAtoms()} atoms in {time.perf_counter() - t0:.3f}s"
+            f"keep_atoms: kept {len(all_indices)} / {mol.GetNumAtoms()} atoms"
         )
     index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(sorted(list(all_indices)))}
     # replace to_replace atoms with hydrogens at distance 1.1 and bond order 1
-    t0 = time.perf_counter()
+    added_hydrogens = []
     for atom_pair in to_replace:
         atom1 = mol.GetAtomWithIdx(atom_pair[0])
         atom2 = mol.GetAtomWithIdx(atom_pair[1])
@@ -188,9 +262,10 @@ def create_molecule_cutout(mol, frags, to_replace, verbose=False):
         direction /= np.linalg.norm(direction)
         new_position = pos1 + direction * 1.1
         remaining_mol.GetConformer().SetAtomPosition(new_idx, new_position)
+        added_hydrogens.append((atom1.GetIdx(), new_idx))
     if verbose:
-        logger.info(f"Hydrogen caps: {len(to_replace)} in {time.perf_counter() - t0:.3f}s")
-    return remaining_mol, index_map
+        logger.info(f"Hydrogen caps: {len(to_replace)}")
+    return remaining_mol, index_map, added_hydrogens
 
 def get_surrounding_indices(mol, center_indices, radius = 5):
     positions = position(mol)
@@ -367,12 +442,11 @@ def split_fragments_by_peptide_bonds(all_used_components, mol, verbose=False):
     """
     sidechain_smarts = "[C:1]([N]-[C](=O)-[C])-[C:2]"
     backbone_smarts = "[C:1](=O)([N])-[C:2]([N])"
-    t0 = time.perf_counter()
     sidechain_bonds = _find_bond_pairs_from_smarts(mol, sidechain_smarts, 1, 2)
     backbone_bonds = _find_bond_pairs_from_smarts(mol, backbone_smarts, 1, 2)
     if verbose:
         logger.info(
-            f"SMARTS matches: sidechain={len(sidechain_bonds)}, backbone={len(backbone_bonds)} in {time.perf_counter() - t0:.3f}s"
+            f"SMARTS matches: sidechain={len(sidechain_bonds)}, backbone={len(backbone_bonds)}"
         )
     sidechain_bonds_by_atom = _build_bond_pair_map(sidechain_bonds)
     backbone_bonds_by_atom = _build_bond_pair_map(backbone_bonds)
