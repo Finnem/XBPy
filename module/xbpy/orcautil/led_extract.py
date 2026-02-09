@@ -65,7 +65,9 @@ __all__ = [
     'extract_interaction_energy',
     'parse_orca_fragments',
     'determine_fragment_groups',
-    'clear_subsystem_cache'
+    'clear_subsystem_cache',
+    'compute_fp_led_interactions',
+    'compute_fp_led_interactions_with_mapping'
 ]
 
 
@@ -828,4 +830,426 @@ def extract_interaction_energy(
         >>> print(f"Interaction energy: {e_int:.4f} kJ/mol")
     """
     return float(led_int.sum().sum())
+
+
+def _process_fp_led_matrices_in_memory(
+    standard_led_matrices: Dict[str, pd.DataFrame],
+    method: str,
+    main_filenames: List[Union[str, Path]],
+    alternative_filenames: List[Union[str, Path]],
+    conversion_factor: float
+) -> Dict[str, pd.DataFrame]:
+    """
+    Process fp-LED matrices in memory from standard LED matrices.
+    
+    This is an in-memory version of process_fp_LED_matrices that works with DataFrames
+    instead of Excel files.
+    """
+    from xbpy._vendor.ledaw_package.nbody_engine import (
+        compute_fp_el_prep,
+        compute_bulk_solvation_contribution
+    )
+    
+    # Process REF sheet
+    df_ref = standard_led_matrices.get('REF', pd.DataFrame())
+    if df_ref.empty:
+        raise ValueError("REF matrix not found in standard LED matrices")
+    
+    df_ref.columns = [int(c) for c in df_ref.columns]
+    df_ref.index = [int(i) for i in df_ref.index]
+    
+    df_ref_distributed = compute_fp_el_prep(df_ref)
+    df_ref_distributed.columns.name = 'REF-EL-PREP'
+    
+    # Get SOLV values and calculate SOLV interaction energy
+    solv_values, e_solv_int_en, _, _, _ = compute_bulk_solvation_contribution(
+        main_filenames, alternative_filenames, conversion_factor, method
+    )
+    
+    fp_led_matrices = {}
+    
+    # Load Electrostat and Exchange sheets for all methods
+    df_electrostat = standard_led_matrices.get('Electrostat', pd.DataFrame())
+    df_exchange = standard_led_matrices.get('Exchange', pd.DataFrame())
+    df_electrostat.columns = [int(c) for c in df_electrostat.columns]
+    df_electrostat.index = [int(i) for i in df_electrostat.index]
+    df_exchange.columns = [int(c) for c in df_exchange.columns]
+    df_exchange.index = [int(i) for i in df_exchange.index]
+    
+    if method.lower() in ["dlpno-ccsd(t)", "dlpno-ccsd"]:
+        # Read TOTAL
+        df_total = standard_led_matrices.get('TOTAL', pd.DataFrame())
+        df_total.columns = [int(c) for c in df_total.columns]
+        df_total.index = [int(i) for i in df_total.index]
+        
+        # Subtract SOLV to get standard LED total without SOLV
+        df_solv = standard_led_matrices.get('SOLV', pd.DataFrame())
+        if not df_solv.empty:
+            df_solv.columns = [int(c) for c in df_solv.columns]
+            df_solv.index = [int(i) for i in df_solv.index]
+            std_df_total_no_solv = df_total - df_solv
+        else:
+            std_df_total_no_solv = df_total
+        
+        # Correlation EL-PREP on standard total without SOLV
+        df_total_distributed = compute_fp_el_prep(std_df_total_no_solv)
+        df_total_distributed.columns.name = 'C-CCSD(T)-EL-PREP' if method.lower() == "dlpno-ccsd(t)" else 'C-CCSD-EL-PREP'
+        
+        df_c_ccsd = df_total_distributed - df_ref_distributed
+        df_c_ccsd.columns.name = 'CCSD(T)-EL-PREP' if method.lower() == "dlpno-ccsd(t)" else 'CCSD-EL-PREP'
+        
+        # DISP - INTER-NODISP decomposition
+        disp_sheet = 'Disp CCSD' if method.lower() == "dlpno-ccsd" else 'Disp CCSD(T)'
+        inter_nondisp_sheet = 'Inter-NonDisp-C-CCSD' if method.lower() == "dlpno-ccsd" else 'Inter-NonDisp-C-CCSD(T)'
+        
+        df_disp_ccsd = standard_led_matrices.get(disp_sheet, pd.DataFrame())
+        df_inter_nondisp = standard_led_matrices.get(inter_nondisp_sheet, pd.DataFrame())
+        df_disp_ccsd.columns = [int(c) for c in df_disp_ccsd.columns]
+        df_disp_ccsd.index = [int(i) for i in df_disp_ccsd.index]
+        df_inter_nondisp.columns = [int(c) for c in df_inter_nondisp.columns]
+        df_inter_nondisp.index = [int(i) for i in df_inter_nondisp.index]
+        
+        # Reconstruct total without SOLV from fp-LED logic
+        df_ref_final = df_electrostat + df_exchange + df_ref_distributed
+        df_c_ccsd_final = df_c_ccsd + df_disp_ccsd + df_inter_nondisp
+        df_total_no_solv = df_ref_final + df_c_ccsd_final
+        
+        # Apply fp-LED SOLV if needed
+        if e_solv_int_en != 0:
+            solv_matrix = df_total_no_solv * (e_solv_int_en / df_total_no_solv.sum().sum())
+            df_total_final = df_total_no_solv + solv_matrix
+            fp_led_matrices['SOLV'] = solv_matrix
+        else:
+            df_total_final = df_total_no_solv
+        
+        fp_led_matrices['TOTAL'] = df_total_final
+        fp_led_matrices['REF'] = df_ref_final
+        fp_led_matrices['Electrostat'] = df_electrostat
+        fp_led_matrices['Exchange'] = df_exchange
+        fp_led_matrices['REF-EL-PREP'] = df_ref_distributed
+        fp_led_matrices['C-CCSD(T)' if method.lower() == "dlpno-ccsd(t)" else 'C-CCSD'] = df_c_ccsd_final
+        fp_led_matrices[disp_sheet] = df_disp_ccsd
+        fp_led_matrices[inter_nondisp_sheet] = df_inter_nondisp
+        fp_led_matrices['C-CCSD(T)-EL-PREP' if method.lower() == "dlpno-ccsd(t)" else 'C-CCSD-EL-PREP'] = df_c_ccsd
+        fp_led_matrices['CCSD(T)-EL-PREP' if method.lower() == "dlpno-ccsd(t)" else 'CCSD-EL-PREP'] = df_total_distributed
+        
+    elif method.lower() == "hfld":
+        # Calculate REF = Electrostat + Exchange + REF-EL-PREP
+        df_ref_final = df_electrostat + df_exchange + df_ref_distributed
+        
+        # Calculate TOTAL = REF + Disp HFLD
+        df_disp_hfld = standard_led_matrices.get('Disp HFLD', pd.DataFrame())
+        df_disp_hfld.columns = [int(c) for c in df_disp_hfld.columns]
+        df_disp_hfld.index = [int(i) for i in df_disp_hfld.index]
+        
+        df_total_hfld = df_ref_final + df_disp_hfld
+        df_total_hfld.columns.name = 'TOTAL'
+        
+        # If SOLV interaction energy is not zero, calculate and add the SOLV matrix
+        if e_solv_int_en != 0:
+            solv_matrix = df_total_hfld * (e_solv_int_en / df_total_hfld.sum().sum())
+            df_total_hfld += solv_matrix
+            fp_led_matrices['SOLV'] = solv_matrix
+        
+        fp_led_matrices['TOTAL'] = df_total_hfld
+        fp_led_matrices['REF'] = df_ref_final
+        fp_led_matrices['Electrostat'] = df_electrostat
+        fp_led_matrices['Exchange'] = df_exchange
+        fp_led_matrices['REF-EL-PREP'] = df_ref_distributed
+        fp_led_matrices['Disp HFLD'] = df_disp_hfld
+    
+    return fp_led_matrices
+
+
+def compute_fp_led_interactions_with_mapping(
+    main_filenames: List[Union[str, Path]],
+    alternative_filenames: List[Union[str, Path]],
+    fragment_mappings: Dict[str, Dict[int, int]],
+    conversion_factor: float = 2625.5,
+    method: str = "DLPNO-CCSD(T)",
+    LEDAW_output_path: Optional[Union[str, Path]] = None,
+    use_temp_dir: bool = True,
+    use_dataframes: bool = False,
+    cleanup_excel: bool = True,
+    verbose: bool = False
+) -> Dict[str, float]:
+    """
+    Compute fp-LED pairwise interactions using custom fragment mappings.
+    
+    This function allows you to specify fragment mappings directly instead of
+    matching by position. Returns fp-LED pairwise interactions as a dictionary.
+    
+    Args:
+        main_filenames: List of ORCA output file paths [supersystem, subsystem1, subsystem2, ...]
+        alternative_filenames: List of alternative ORCA output file paths (same length as main_filenames)
+        fragment_mappings: Dictionary mapping system labels to fragment mappings.
+                         Format: {
+                             "SUPERSYS": {frag_id: frag_id, ...},  # Identity mapping for supersystem
+                             "SUBSYS1": {subsys_frag_id: supersys_frag_id, ...},
+                             "SUBSYS2": {subsys_frag_id: supersys_frag_id, ...},
+                             ...
+                         }
+                         Fragment IDs are 1-based (as in ORCA output).
+        conversion_factor: Energy conversion factor (default: 2625.5 for Hartree to kJ/mol)
+        method: QM method used ("DLPNO-CCSD(T)", "DLPNO-CCSD", "HFLD")
+        LEDAW_output_path: Directory for LEDAW output (default: same as first file's directory)
+        use_temp_dir: If True, use a temporary directory for Excel files and clean up after (default: True)
+        use_dataframes: If True, process fp-LED matrices in memory using DataFrames instead of Excel (default: False)
+        cleanup_excel: If True, delete Excel files after extracting data (default: True, only used if use_temp_dir=False)
+        verbose: If True, print detailed progress information
+    
+    Returns:
+        Dictionary of fp-LED pairwise interactions in format:
+        {"frag_i_frag_j": energy, ...} where i <= j (upper triangle only)
+        Energies are in the same units as conversion_factor (typically kJ/mol)
+        
+    Example:
+        >>> mappings = {
+        ...     "SUPERSYS": {1: 1, 2: 2, 3: 3, 4: 4},
+        ...     "SUBSYS1": {1: 1, 2: 2, 3: 3},  # Fragments 1,2,3 map to supersystem 1,2,3
+        ...     "SUBSYS2": {1: 4}  # Fragment 1 maps to supersystem 4
+        ... }
+        >>> fp_interactions = compute_fp_led_interactions_with_mapping(
+        ...     ["complex.out", "ligand.out", "receptor.out"],
+        ...     ["", "", ""],
+        ...     mappings,
+        ...     use_temp_dir=True  # Use temporary directory, automatically cleaned up
+        ... )
+        >>> # fp_interactions = {"1_1": -5.234, "1_2": -2.156, "1_4": -1.234, ...}
+    """
+    import tempfile
+    import shutil
+    from xbpy._vendor.ledaw_package.nbody_engine import (
+        construct_label_mappings as _original_construct_label_mappings,
+        normalize_path
+    )
+    
+    if not _LEDAW_AVAILABLE:
+        raise ImportError(f"LEDAW not available: {_LEDAW_IMPORT_ERROR}")
+    
+    # Set up output path - use temporary directory if requested
+    temp_dir = None
+    if use_temp_dir:
+        temp_dir = tempfile.mkdtemp(prefix="ledaw_")
+        LEDAW_output_path = temp_dir
+        if verbose:
+            print(f"Using temporary directory for LEDAW output: {LEDAW_output_path}")
+    else:
+        if LEDAW_output_path is None:
+            LEDAW_output_path = Path(main_filenames[0]).parent
+        else:
+            LEDAW_output_path = Path(LEDAW_output_path)
+    
+    LEDAW_output_path = normalize_path(str(LEDAW_output_path))
+    
+    # Create a custom construct_label_mappings function that uses provided mappings
+    def _custom_construct_label_mappings(main_fns, alt_fns, output_path):
+        """Custom version that uses provided fragment mappings."""
+        # Convert fragment mappings to the format expected by LEDAW
+        main_label_mappings_ghost_free = {}
+        alt_label_mappings_ghost_free = {}
+        
+        # SUPERSYS mapping (should be identity)
+        if "SUPERSYS" in fragment_mappings:
+            main_label_mappings_ghost_free["SUPERSYS"] = fragment_mappings["SUPERSYS"].copy()
+        else:
+            # Default: identity mapping
+            from xbpy._vendor.ledaw_package.nbody_engine import extract_fragments
+            supersystem_file = normalize_path(main_fns[0])
+            supersystem_frags, super_ghost_flags, _ = extract_fragments(supersystem_file)
+            main_label_mappings_ghost_free["SUPERSYS"] = {
+                k: k for k, v in super_ghost_flags.items() if not v
+            }
+        
+        alt_label_mappings_ghost_free["SUPERSYS"] = main_label_mappings_ghost_free["SUPERSYS"].copy()
+        
+        # SUBSYS mappings
+        for i in range(1, len(main_fns)):
+            subsys_label = f"SUBSYS{i}"
+            if subsys_label in fragment_mappings:
+                main_label_mappings_ghost_free[subsys_label] = fragment_mappings[subsys_label].copy()
+            else:
+                # Default: empty mapping
+                main_label_mappings_ghost_free[subsys_label] = {}
+            
+            alt_label_mappings_ghost_free[subsys_label] = main_label_mappings_ghost_free[subsys_label].copy()
+        
+        # Determine BSSE (check if any subsystem has ghost atoms)
+        bsse_found = False
+        for i in range(1, len(main_fns)):
+            from xbpy._vendor.ledaw_package.nbody_engine import extract_fragments
+            subsystem_file = normalize_path(main_fns[i])
+            _, ghost_flags, bsse = extract_fragments(subsystem_file)
+            bsse_found |= bsse
+        
+        if verbose:
+            print("======== Fragment Mappings (Custom) ========")
+            print("main_label_mappings_ghost_free:", main_label_mappings_ghost_free)
+            print("alt_label_mappings_ghost_free:", alt_label_mappings_ghost_free)
+            print("bsse_found:", bsse_found)
+        
+        return main_label_mappings_ghost_free, alt_label_mappings_ghost_free, bsse_found
+    
+    # Temporarily replace construct_label_mappings
+    import xbpy._vendor.ledaw_package.nbody_engine as nbody_engine
+    original_func = nbody_engine.construct_label_mappings
+    nbody_engine.construct_label_mappings = _custom_construct_label_mappings
+    
+    try:
+        # Run LEDAW engine
+        if verbose:
+            print(f"Running LEDAW with custom fragment mappings...")
+        
+        _LEDAW_ENGINE(
+            main_filenames=[str(f) for f in main_filenames],
+            alternative_filenames=[str(f) if f else "" for f in alternative_filenames],
+            conversion_factor=conversion_factor,
+            method=method,
+            LEDAW_output_path=LEDAW_output_path,
+            relabel_mapping=None,
+            use_ref_as_rhf_in_hfld=None
+        )
+        
+        # Read standard LED matrices from Excel (needed for fp-LED processing)
+        standard_excel_path = Path(LEDAW_output_path) / "Summary_Standard_LED_matrices.xlsx"
+        if not standard_excel_path.exists():
+            raise FileNotFoundError(f"Standard LED Excel file not found: {standard_excel_path}")
+        
+        # Load all standard LED matrices into memory
+        standard_led_matrices = {}
+        with pd.ExcelFile(standard_excel_path) as xl:
+            for sheet_name in xl.sheet_names:
+                df = pd.read_excel(xl, sheet_name=sheet_name, index_col=0)
+                standard_led_matrices[sheet_name] = df
+        
+        # Process fp-LED matrices in memory (no Excel files for fp-LED)
+        if use_dataframes:
+            # Process entirely in memory
+            fp_led_matrices = _process_fp_led_matrices_in_memory(
+                standard_led_matrices, method, main_filenames, alternative_filenames, conversion_factor
+            )
+            df_fp_led = fp_led_matrices.get('TOTAL', pd.DataFrame())
+        else:
+            # Use existing Excel-based approach (backward compatibility)
+            fp_excel_path = Path(LEDAW_output_path) / "Summary_fp-LED_matrices.xlsx"
+            if not fp_excel_path.exists():
+                raise FileNotFoundError(f"fp-LED Excel file not found: {fp_excel_path}")
+            df_fp_led = pd.read_excel(fp_excel_path, sheet_name='TOTAL', index_col=0)
+        
+        # Convert to dictionary format
+        fp_interactions = {}
+        for frag_i in df_fp_led.index:
+            if pd.notna(frag_i):
+                for frag_j in df_fp_led.columns:
+                    if pd.notna(frag_j):
+                        # Get the interaction energy for this pair
+                        # Use upper triangle to avoid duplicates (LED matrices are symmetric)
+                        if frag_i <= frag_j:
+                            energy = df_fp_led.loc[frag_i, frag_j]
+                            if pd.notna(energy):
+                                key = f"{int(frag_i)}_{int(frag_j)}"
+                                fp_interactions[key] = float(energy)
+        
+        # Clean up Excel files if requested
+        if use_temp_dir:
+            # If using temp directory, always clean it up
+            try:
+                shutil.rmtree(temp_dir)
+                if verbose:
+                    print(f"Cleaned up temporary directory: {temp_dir}")
+            except Exception as e:
+                if verbose:
+                    print(f"Error cleaning up temporary directory: {e}")
+        elif cleanup_excel:
+            # Only clean up Excel files if not using temp dir
+            try:
+                import glob
+                excel_files = glob.glob(str(Path(LEDAW_output_path) / "*.xlsx"))
+                for excel_file in excel_files:
+                    try:
+                        os.remove(excel_file)
+                        if verbose:
+                            print(f"Deleted: {excel_file}")
+                    except Exception as e:
+                        if verbose:
+                            print(f"Could not delete {excel_file}: {e}")
+            except Exception as e:
+                if verbose:
+                    print(f"Error during cleanup: {e}")
+        
+        return fp_interactions
+        
+    finally:
+        # Restore original function
+        nbody_engine.construct_label_mappings = original_func
+        # Ensure temp directory is cleaned up even on error
+        if use_temp_dir and temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+
+
+def compute_fp_led_interactions(
+    orca_out_path: Union[str, Path],
+    method: str = "DLPNO-CCSD(T)",
+    conversion_factor: float = 2625.5,
+    force_regenerate: bool = False,
+    verbose: bool = False
+) -> Dict[str, float]:
+    """
+    Compute fp-LED pairwise interactions for a single ORCA output file.
+    
+    This is a convenience function that runs LEDAW and extracts fp-LED interactions
+    for a single system (no subsystem subtraction).
+    
+    Args:
+        orca_out_path: Path to ORCA .out file
+        method: QM method used ("DLPNO-CCSD(T)", "DLPNO-CCSD", "HFLD")
+        conversion_factor: Energy conversion factor (default: 2625.5 for Hartree to kJ/mol)
+        force_regenerate: If True, regenerate LED files even if they exist
+        verbose: If True, enable detailed output
+    
+    Returns:
+        Dictionary of fp-LED pairwise interactions in format:
+        {"frag_i_frag_j": energy, ...} where i <= j (upper triangle only)
+        
+    Example:
+        >>> fp_interactions = compute_fp_led_interactions("molecule.out")
+        >>> # fp_interactions = {"1_1": -5.234, "1_2": -2.156, "2_2": -3.421, ...}
+    """
+    orca_out_path = Path(orca_out_path)
+    
+    # Ensure LED Excel file exists (run LEDAW if needed)
+    excel_path = _ensure_led_file(
+        orca_out_path, 
+        method=method, 
+        conversion_factor=conversion_factor,
+        force_regenerate=force_regenerate,
+        verbose=verbose
+    )
+    
+    # Read fp-LED results
+    fp_excel_path = excel_path.parent / "Summary_fp-LED_matrices.xlsx"
+    if not fp_excel_path.exists():
+        raise FileNotFoundError(f"fp-LED Excel file not found: {fp_excel_path}. LEDAW may not have generated fp-LED matrices.")
+    
+    # Load fp-LED TOTAL matrix
+    df_fp_led = pd.read_excel(fp_excel_path, sheet_name='TOTAL', index_col=0)
+    
+    # Convert to dictionary format
+    fp_interactions = {}
+    for frag_i in df_fp_led.index:
+        if pd.notna(frag_i):
+            for frag_j in df_fp_led.columns:
+                if pd.notna(frag_j):
+                    # Get the interaction energy for this pair
+                    # Use upper triangle to avoid duplicates (LED matrices are symmetric)
+                    if frag_i <= frag_j:
+                        energy = df_fp_led.loc[frag_i, frag_j]
+                        if pd.notna(energy):
+                            key = f"{int(frag_i)}_{int(frag_j)}"
+                            fp_interactions[key] = float(energy)
+    
+    return fp_interactions
 

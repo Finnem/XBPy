@@ -165,6 +165,8 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
         molecules = Chem.rdmolfiles.MaeMolSupplier(gzip.open(path), *args, **kwargs)
     elif os.path.splitext(path)[1] == ".xyz":
         molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
+    elif os.path.splitext(path)[1] == ".inp":
+        molecules = read_orca_inp_file(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol=as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
     else:
         try:
             molecules = read_coord_file(path, reference_molecule, proximityBonding=proximityBonding, verbose=verbose, *args, **kwargs)
@@ -385,6 +387,7 @@ def write_molecules(mols, path, file_type = None, batch_size = False, progress_i
         The file type can be inferred from the ending of the path or be explicitly given, in which case the ending will be overwritten.
         If a single molecule is given, the molecule will be saved to the given path.
         If multiple molecules are given, a directory with the given path will be created and each molecules will be saved under the path's stem and the given ending.
+        If the number of molecules is greater than the max_chunk_size, the molecules will be written in chunks of the given size.
         If no ending is given, the molecules index will be appended. and the ending will be appended to the file name.
         ending can be of type str or a function that takes the molecule and the index as arguments and returns a string.
 
@@ -556,3 +559,234 @@ def get_duplicate_positions(molecule):
     indices_to_delete = sorted_indices[1:][is_same]
     
     return indices_to_delete
+
+
+def _extract_orca_energy(out_path):
+    """Extract total energy from ORCA output file.
+    
+    Args:
+        out_path: Path to ORCA .out file
+        
+    Returns:
+        float or None: Total energy in Hartree, or None if not found
+    """
+    import re
+    
+    if not out_path.exists():
+        return None
+    
+    # Common ORCA energy patterns
+    patterns = [
+        r"FINAL SINGLE POINT ENERGY\s+([-+]?\d+\.\d+)",
+        r"Total Energy\s*:\s*([-+]?\d+\.\d+)",
+        r"Total energy\s+=\s+([-+]?\d+\.\d+)",
+        r"E\(CORR\)\s+([-+]?\d+\.\d+)",  # Correlation energy (for some methods)
+    ]
+    
+    try:
+        with open(out_path, 'r') as f:
+            content = f.read()
+        
+        # Try patterns in order
+        for pattern in patterns:
+            match = re.search(pattern, content)
+            if match:
+                return float(match.group(1))
+        
+        # If no pattern matches, return None
+        return None
+    except Exception:
+        return None
+
+
+def read_orca_inp_file(path, reference_molecule=None, proximityBonding=True, as_property_mol=False, duplicate_check=True, verbose="auto", extract_energy=True, run_ledaw=True, method="DLPNO-CCSD(T)", conversion_factor=2625.5, *args, **kwargs):
+    """Read an ORCA input file and return the molecule.
+    
+    Parses ORCA input files that contain xyz coordinates either inline or in a referenced file.
+    Optionally extracts fragment IDs from atom labels (e.g., Br(1), C(2)) and stores them as
+    a molecule property. Can also extract system energy and run LEDAW for fragment energy analysis.
+    
+    Args:
+        path (str): Path to the ORCA input file (.inp).
+        reference_molecule (RDKit.Mol): Reference molecule to use as a template for xyz reading.
+        proximityBonding (bool): Defaults to True. If True, infer bonds from coordinates.
+        as_property_mol (bool): Defaults to False. If True, return as PropertyMol.
+        duplicate_check (bool): Defaults to True. If True, check for duplicate positions.
+        verbose (bool or "auto"): Defaults to "auto". Verbosity for bond inference.
+        extract_energy (bool): Defaults to True. If True, extract total energy from .out file if available.
+        run_ledaw (bool): Defaults to True. If True and LED is in header, automatically run LEDAW and extract fragment energies.
+        method (str): QM method for LEDAW (default: "DLPNO-CCSD(T)").
+        conversion_factor (float): Energy conversion factor for LEDAW (default: 2625.5 for Hartree to kJ/mol).
+        *args: Additional arguments to pass to read_molecules_xyz.
+        **kwargs: Additional keyword arguments to pass to read_molecules_xyz.
+    
+    Returns:
+        list(RDKit.Mol): List containing the molecule parsed from the ORCA input file.
+    """
+    import os
+    import json
+    import re
+    from pathlib import Path
+    
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"ORCA input file not found: {path}")
+    
+    with open(path, 'r') as f:
+        lines = f.readlines()
+    
+    # Check header for LED keyword
+    header_line = lines[0].strip() if lines else ""
+    has_led = "LED" in header_line.upper()
+    
+    # Check for corresponding .out file
+    out_path = path.with_suffix('.out')
+    has_output = out_path.exists()
+    
+    # Find the xyz section
+    xyz_start_idx = None
+    xyz_end_idx = None
+    xyzfile_pattern = None
+    
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        # Check for * xyzfile or *xyzfile pattern first (more specific)
+        if stripped.startswith('* xyzfile') or stripped.startswith('*xyzfile'):
+            # Extract the filename (format: * xyzfile <charge> <multiplicity> <filename>)
+            parts = stripped.split()
+            if len(parts) >= 4:
+                # Filename is the last part after charge and multiplicity
+                xyzfile_pattern = parts[-1]
+            break
+        # Check for *xyz pattern (inline coordinates)
+        elif stripped.startswith('*xyz'):
+            xyz_start_idx = i + 1  # Start reading from next line
+            # Look for the closing *
+            for j in range(i + 1, len(lines)):
+                if lines[j].strip() == '*':
+                    xyz_end_idx = j
+                    break
+            break
+    
+    if xyzfile_pattern:
+        # Handle external xyzfile reference
+        xyz_path = path.parent / xyzfile_pattern
+        if not xyz_path.exists():
+            raise FileNotFoundError(f"Referenced xyz file not found: {xyz_path}")
+        
+        # Read the molecule from the xyz file
+        mols = read_molecules_xyz(
+            str(xyz_path),
+            reference_molecule=reference_molecule,
+            proximityBonding=proximityBonding,
+            as_property_mol=as_property_mol,
+            duplicate_check=duplicate_check,
+            verbose=verbose,
+            *args,
+            **kwargs
+        )
+        mol = mols[0]
+        
+        # Extract energy from output file if requested and available
+        if extract_energy and has_output:
+            energy = _extract_orca_energy(out_path)
+            if energy is not None:
+                if not as_property_mol:
+                    mol = PropertyMol(mol)
+                mol.SetProp("total_energy", str(energy))
+        
+        return [mol]
+    
+    elif xyz_start_idx is not None and xyz_end_idx is not None:
+        # Handle inline xyz coordinates
+        xyz_lines = lines[xyz_start_idx:xyz_end_idx]
+        
+        # Parse coordinates and extract fragment IDs
+        xyz_block_lines = []
+        fragment_ids = []
+        fragment_pattern = re.compile(r'^(\w+)\((\d+)\)\s+(.+)$')  # Matches "Br(1)  x y z"
+        element_pattern = re.compile(r'^(\w+)\s+(.+)$')  # Matches "Br  x y z"
+        
+        for line in xyz_lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Try to match fragment pattern first
+            frag_match = fragment_pattern.match(line)
+            if frag_match:
+                element = frag_match.group(1)
+                frag_id = int(frag_match.group(2))
+                coords_str = frag_match.group(3)
+                fragment_ids.append(frag_id)
+            else:
+                # Try to match without fragment ID
+                elem_match = element_pattern.match(line)
+                if elem_match:
+                    element = elem_match.group(1)
+                    coords_str = elem_match.group(2)
+                    fragment_ids.append(None)
+                else:
+                    continue
+            
+            # Parse coordinates and format for xyz block
+            coords = coords_str.split()
+            if len(coords) >= 3:
+                xyz_block_lines.append(f"{element}\t{coords[0]}\t{coords[1]}\t{coords[2]}\n")
+        
+        # Construct xyz block string
+        xyz_block = f"{len(xyz_block_lines)}\n\n" + "".join(xyz_block_lines)
+        
+        # Create molecule directly from xyz block
+        mol = Chem.MolFromXYZBlock(xyz_block)
+        
+        if duplicate_check:
+            duplicate_indices = get_duplicate_positions(mol)
+            if len(duplicate_indices) > 0:
+                logging.warning(f"Duplicate positions found in molecule {path}. Deleting {len(duplicate_indices)} atoms.")
+                from .rw import remove_atoms
+                mol = remove_atoms(mol, [int(i) for i in duplicate_indices])
+        
+        # Infer bonds if requested
+        if proximityBonding:
+            mol = proximity_bond(mol, as_property_mol=as_property_mol, verbose=verbose)
+        
+        # Use reference molecule to copy bonds if provided
+        if reference_molecule is not None:
+            if not proximityBonding:
+                raise ValueError("Reference molecule provided but proximity bonding not requested.")
+            if not isinstance(reference_molecule, list):
+                reference_molecule = [reference_molecule]
+            mol = reduce_to_templates(mol, reference_molecule)
+        
+        # Process fragment IDs if present
+        if any(fid is not None for fid in fragment_ids):
+            # Group atoms by fragment ID
+            fragment_dict = {}
+            for atom_idx, frag_id in enumerate(fragment_ids):
+                if frag_id is not None:
+                    if frag_id not in fragment_dict:
+                        fragment_dict[frag_id] = []
+                    fragment_dict[frag_id].append(atom_idx)
+            
+            # Convert to list of lists, sorted by fragment ID
+            fragments = [fragment_dict[fid] for fid in sorted(fragment_dict.keys())]
+            
+            # Store as molecule property (using JSON for list storage)
+            if not as_property_mol:
+                # Convert to PropertyMol if needed to store properties
+                mol = PropertyMol(mol)
+            mol.SetProp("fragments", json.dumps(fragments))
+        
+        # Extract energy from output file if requested and available
+        if extract_energy and has_output:
+            energy = _extract_orca_energy(out_path)
+            if energy is not None:
+                if not as_property_mol:
+                    mol = PropertyMol(mol)
+                mol.SetProp("total_energy", str(energy))
+        
+        return [mol]
+    else:
+        raise ValueError(f"Could not find xyz coordinates section in ORCA input file: {path}")
+
