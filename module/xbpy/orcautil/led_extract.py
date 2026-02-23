@@ -555,7 +555,7 @@ def _compute_covaled_interaction_matrix(
     # Process each fragment pair
     for i, frag_i in enumerate(all_frags):
         for j, frag_j in enumerate(all_frags):
-            if frag_i > frag_j:  # Skip lower triangle
+            if frag_i >= frag_j:  # Skip lower triangle and diagonal (fragment doesn't interact with itself)
                 continue
             
             try:

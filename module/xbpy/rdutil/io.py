@@ -167,6 +167,9 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
         molecules = read_molecules_xyz(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol = as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
     elif os.path.splitext(path)[1] == ".inp":
         molecules = read_orca_inp_file(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol=as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
+    elif os.path.splitext(path)[1] == ".out":
+        # ORCA output files - extract input block and parse as input file
+        molecules = read_orca_inp_file(path, reference_molecule, proximityBonding=proximityBonding, as_property_mol=as_property_mol, duplicate_check=duplicate_check, verbose=verbose, *args, **kwargs)
     else:
         try:
             molecules = read_coord_file(path, reference_molecule, proximityBonding=proximityBonding, verbose=verbose, *args, **kwargs)
@@ -599,15 +602,94 @@ def _extract_orca_energy(out_path):
         return None
 
 
-def read_orca_inp_file(path, reference_molecule=None, proximityBonding=True, as_property_mol=False, duplicate_check=True, verbose="auto", extract_energy=True, run_ledaw=True, method="DLPNO-CCSD(T)", conversion_factor=2625.5, *args, **kwargs):
-    """Read an ORCA input file and return the molecule.
+def _extract_input_block_from_orca_out(out_path):
+    """
+    Extract the INPUT FILE section from an ORCA output file and return it as a list of lines.
     
-    Parses ORCA input files that contain xyz coordinates either inline or in a referenced file.
+    The INPUT FILE section in ORCA output files contains the original input file with line numbers
+    prefixed like "|  1>", "|  2>", etc. This function extracts that section and removes the prefixes.
+    
+    Args:
+        out_path: Path to ORCA output file
+    
+    Returns:
+        List of lines from the input file section (with line number prefixes removed)
+        Returns None if INPUT FILE section not found
+    """
+    import re
+    from pathlib import Path
+    
+    out_path = Path(out_path)
+    if not out_path.exists():
+        return None
+    
+    with open(out_path, 'r') as f:
+        lines = f.readlines()
+    
+    # Find the INPUT FILE section
+    # The section is marked by "INPUT FILE" - can be:
+    #   1. On its own line between "===" separators:
+    #      ================================================================================
+    #                                        INPUT FILE
+    #      ================================================================================
+    #   2. On a line with "===" separators: "===.... INPUT FILE"
+    input_start_idx = None
+    for i, line in enumerate(lines):
+        # Look for "INPUT FILE" - check both formats
+        line_upper = line.upper()
+        if "INPUT FILE" in line_upper:
+            # Check if "===" is in the same line (format 2)
+            if "===" in line:
+                # Input lines start after this line
+                input_start_idx = i + 1
+            # Check if there's a separator line after "INPUT FILE" (format 1)
+            elif i + 1 < len(lines) and "===" in lines[i + 1]:
+                # Input lines start after the separator (skip "INPUT FILE" line and separator)
+                input_start_idx = i + 2
+            else:
+                # No separator, start right after "INPUT FILE" line
+                input_start_idx = i + 1
+            break
+    
+    if input_start_idx is None:
+        return None
+    
+    # Extract input lines until we hit another section or end of file
+    # Look for lines starting with "|" followed by a number and ">"
+    input_lines = []
+    line_pattern = re.compile(r'^\|\s*\d+>\s*(.*)$')
+    
+    for i in range(input_start_idx, len(lines)):
+        line = lines[i]
+        # Check if we've hit another section (starts with ===)
+        if line.strip().startswith('===') and len(line.strip()) > 3:
+            break
+        
+        # Skip empty lines and the "NAME = ..." line
+        if not line.strip() or line.strip().startswith('NAME ='):
+            continue
+        
+        # Try to match the line number pattern
+        match = line_pattern.match(line)
+        if match:
+            # Extract the actual content after "|  N>"
+            content = match.group(1)
+            input_lines.append(content + '\n')
+        # If line doesn't match pattern, skip it (might be a comment or other non-input line)
+    
+    return input_lines if input_lines else None
+
+
+def read_orca_inp_file(path, reference_molecule=None, proximityBonding=True, as_property_mol=False, duplicate_check=True, verbose="auto", extract_energy=True, run_ledaw=True, method="DLPNO-CCSD(T)", conversion_factor=2625.5, *args, **kwargs):
+    """Read an ORCA input file or output file and return the molecule.
+    
+    Parses ORCA input files (.inp) that contain xyz coordinates either inline or in a referenced file.
+    Can also parse ORCA output files (.out) by extracting the INPUT FILE section from the output.
     Optionally extracts fragment IDs from atom labels (e.g., Br(1), C(2)) and stores them as
     a molecule property. Can also extract system energy and run LEDAW for fragment energy analysis.
     
     Args:
-        path (str): Path to the ORCA input file (.inp).
+        path (str): Path to the ORCA input file (.inp) or output file (.out).
         reference_molecule (RDKit.Mol): Reference molecule to use as a template for xyz reading.
         proximityBonding (bool): Defaults to True. If True, infer bonds from coordinates.
         as_property_mol (bool): Defaults to False. If True, return as PropertyMol.
@@ -632,15 +714,25 @@ def read_orca_inp_file(path, reference_molecule=None, proximityBonding=True, as_
     if not path.exists():
         raise FileNotFoundError(f"ORCA input file not found: {path}")
     
-    with open(path, 'r') as f:
-        lines = f.readlines()
+    # Check if this is actually an output file - if so, extract input block
+    is_out_file = path.suffix == '.out'
+    if is_out_file:
+        input_lines = _extract_input_block_from_orca_out(path)
+        if input_lines is None:
+            raise ValueError(f"Could not find INPUT FILE section in ORCA output file: {path}")
+        lines = input_lines
+        # The output file path is the actual file for energy extraction
+        out_path = path
+    else:
+        with open(path, 'r') as f:
+            lines = f.readlines()
+        out_path = path.with_suffix('.out')
     
     # Check header for LED keyword
     header_line = lines[0].strip() if lines else ""
     has_led = "LED" in header_line.upper()
     
     # Check for corresponding .out file
-    out_path = path.with_suffix('.out')
     has_output = out_path.exists()
     
     # Find the xyz section
