@@ -1335,13 +1335,15 @@ def compute_all_standard_led_int_en_matrices(system_labels, conversion_factor, m
                     df_result = (df_supersystem - df_sum_subsystems) * conversion_factor
                 
                 # Keep only upper triangle
-                df_result = df_result.where(np.triu(np.ones(df_result.shape), k=0).astype(bool))
+                df_result = df_result.where(np.triu(np.ones(df_result.shape), k=0).astype(bool)).copy()
                 matrices[new_sheet_name] = df_result
 
     # Handle Dispersion matrices for DLPNO-CCSD(T), DLPNO-CCSD, and HFLD methods
     if 'Disp SP' in matrices:
         df_disp_wp = matrices.get('WP', pd.DataFrame(np.nan, index=matrices['SP'].index, columns=matrices['SP'].columns)).copy()
-        np.fill_diagonal(df_disp_wp.values, np.nan)
+        arr = np.array(df_disp_wp.values, copy=True)
+        np.fill_diagonal(arr, np.nan)
+        df_disp_wp.iloc[:, :] = arr
         matrices['Disp WP'] = df_disp_wp
 
         df_disp_sp = matrices['Disp SP']
@@ -1360,10 +1362,12 @@ def compute_all_standard_led_int_en_matrices(system_labels, conversion_factor, m
         df_disp_wp = matrices['Disp WP']
         
         with np.errstate(divide='ignore', invalid='ignore'):
-            df_disp_t = np.divide(df_disp_sp * df_disp_t, matrices['SP'])
-            df_disp_t[np.isnan(df_disp_t)] = 0
+            arr = np.divide(np.array(df_disp_sp.values, copy=True)*np.array(df_disp_t.values, copy=True),np.array(matrices['SP'].values, copy=True))
+            arr = np.array(arr, copy=True)
+            arr[np.isnan(arr)] = 0
 
-        df_disp_t = df_disp_t.where(np.triu(np.ones(df_disp_t.shape), k=0).astype(bool))
+        df_disp_t = pd.DataFrame(arr, index=df_disp_sp.index, columns=df_disp_sp.columns)
+        df_disp_t = df_disp_t.where(np.triu(np.ones(df_disp_t.shape), k=0).astype(bool)).copy()
         matrices['Disp T'] = df_disp_t
         
         df_disp_ccsd_t = df_disp_sp + df_disp_wp + df_disp_t
@@ -1471,7 +1475,9 @@ def relabel_and_sort_fragments(relabel_mapping, LEDAW_output_path, method):
 
                 # Set diagonal of Electrostat and Exchange to None
                 if sheet_name in ['Electrostat', 'Exchange']:
-                    np.fill_diagonal(df.values, None)
+                    arr = np.array(df.values, copy=True)
+                    np.fill_diagonal(arr, None)
+                    df.iloc[:, :] = arr
 
                 # Ensure symmetry: copy upper to lower triangle
                 for i in range(df.shape[0]):
@@ -1503,7 +1509,7 @@ def clean_redundant_frags(LEDAW_output_path, method):
 
     # Ensure symmetry and float dtype
     df_total = df_total.astype(float)
-    df_total = df_total.where(np.triu(np.ones(df_total.shape)).astype(bool))
+    df_total = df_total.where(np.triu(np.ones(df_total.shape)).astype(bool)).copy()
 
     # Identify redundant rows/columns (all zeros in upper triangle including diagonal)
     mask_upper = np.triu(np.ones(df_total.shape), k=0).astype(bool)
@@ -1611,8 +1617,9 @@ def compute_fp_el_prep(df_ref):
 
     # Convert to DataFrame and set diagonal and below-diagonal elements to NaN
     distributed_df = pd.DataFrame(distributed_matrix, index=df_ref.index, columns=df_ref.columns)
-    np.fill_diagonal(distributed_df.values, np.nan)
-    distributed_df = distributed_df.where(np.triu(np.ones(distributed_df.shape), k=1).astype(bool))
+    arr = np.array(distributed_df.values, copy=True)
+    arr[~np.triu(np.ones(arr.shape, dtype=bool), k=1)] = np.nan
+    distributed_df.iloc[:, :] = arr
 
     return distributed_df
 
@@ -1780,7 +1787,7 @@ def write_nbody_solv_files(LEDAW_output_path, total_solv_int_energy, ref_diel_in
             return df
         # Create a boolean mask for the upper triangle (k=0 includes diagonal)
         mask = np.triu(np.ones(df.shape), k=0).astype(bool)
-        return df.where(mask)
+        return df.where(mask).copy()
 
     # Helper to apply the masking (diagonal and below NaN)
     def mask_diagonal_and_below(df):
@@ -1788,7 +1795,7 @@ def write_nbody_solv_files(LEDAW_output_path, total_solv_int_energy, ref_diel_in
             return df
         # Create a boolean mask for the upper triangle (k=1 excludes diagonal)
         mask = np.triu(np.ones(df.shape), k=1).astype(bool)
-        return df.where(mask)
+        return df.where(mask).copy()
 
     # --- Process and Write SOLV-fp.xlsx ---
     try:
