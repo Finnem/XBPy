@@ -3,5 +3,6 @@ from .HydrogenBondDonor import *
 from .PiPiInteractions import *
 from .Cation import *
 from .Anion import *
+from .ApolarSurface import *
 from .Detection import *
 from .strength import *

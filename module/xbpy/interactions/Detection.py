@@ -3,7 +3,8 @@ from . import AnionReceptor, AnionLigand, \
         CationReceptor, CationLigand, \
         HydrogenBondAcceptorReceptor, HydrogenBondDonorLigand, \
         HydrogenBondDonorReceptor, HydrogenBondAcceptorLigand, \
-        AromaticProximityLigand, AromaticProximityReceptor
+        AromaticProximityLigand, AromaticProximityReceptor, \
+        ApolarSurfaceReceptor
 from pathlib import Path
 
 hbond_color = "#4270D4"#"#205F86"
@@ -24,6 +25,7 @@ class Interactions():
         self.hydrogen_bond_donor_receptor = HydrogenBondDonorReceptor(receptor)
         self.bad_hydrogen_bond_donor_receptor = HydrogenBondDonorReceptor(receptor, angle_threshold=60, distance_threshold=3.5)
         self.pi_stacking_receptor = AromaticProximityReceptor(receptor)
+        self.apolar_surface_receptor = ApolarSurfaceReceptor(receptor)
 
     def detect_interactions(self, ligand):
         cation_ligand = CationLigand(ligand)
@@ -58,6 +60,7 @@ class Interactions():
 
         # pi stacking interactions
         pi_stacking_interactions = self.pi_stacking_receptor.detect_interactions(pi_stacking_ligand)
+        apolar_surface_interactions = self.apolar_surface_receptor.detect_interactions(ligand)
 
         return {
             "hydrogen_bond_donor_interactions": hydrogen_bond_donor_interactions,
@@ -70,7 +73,8 @@ class Interactions():
             "dipole_anion_interactions": dipole_anion_interactions,
             "anion_cation_interactions": anion_cation_interactions,
             "cation_anion_interactions": cation_anion_interactions,
-            "pi_stacking_interactions": pi_stacking_interactions
+            "pi_stacking_interactions": pi_stacking_interactions,
+            "apolar_surface_interactions": apolar_surface_interactions,
         }
 
     def write_interaction_display(self, ligand, filename, prefix = None, with_self = False):
