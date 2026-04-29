@@ -211,6 +211,52 @@ def _read_molecules_file(path, store_path = True, reference_molecule = None, pro
     return molecules
 
 
+def _read_xyz_blocks(path):
+    """Read one or more XYZ entries from a file as RDKit-compatible XYZ blocks."""
+    blocks = []
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    i = 0
+    frame_idx = 0
+    while i < len(lines):
+        # Skip blank lines between frames.
+        while i < len(lines) and not lines[i].strip():
+            i += 1
+        if i >= len(lines):
+            break
+
+        try:
+            n_atoms = int(lines[i].strip())
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid XYZ atom count at line {i + 1} in {path}: {lines[i].rstrip()}"
+            ) from exc
+        i += 1
+
+        if i >= len(lines):
+            raise ValueError(f"Missing XYZ comment line for frame {frame_idx} in {path}")
+        comment = lines[i].rstrip("\n")
+        i += 1
+
+        if i + n_atoms > len(lines):
+            raise ValueError(
+                f"XYZ frame {frame_idx} in {path} declares {n_atoms} atoms, "
+                f"but only {len(lines) - i} coordinate lines remain"
+            )
+
+        coord_lines = lines[i:i + n_atoms]
+        i += n_atoms
+
+        block = f"{n_atoms}\n{comment}\n" + "".join(coord_lines)
+        if not block.endswith("\n"):
+            block += "\n"
+        blocks.append((comment, block))
+        frame_idx += 1
+
+    return blocks
+
+
 def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True, as_property_mol = False, duplicate_check = True, verbose = "auto", *args, **kwargs):
     """Read molecules as RDK molecules from a single xyz file. Coordinates are converted to a RDKit molecule using the reference molecule as a template.
 
@@ -227,27 +273,43 @@ def read_molecules_xyz(path, reference_molecule =None , proximityBonding = True,
     import rdkit.Chem as Chem
     from .rw import remove_atoms
 
+    molecules = []
     if os.path.splitext(path)[1] == ".xyz":
-        mol = Chem.rdmolfiles.MolFromXYZFile(path)
-        if duplicate_check:
-            duplicate_indices = get_duplicate_positions(mol)
-            if len(duplicate_indices) > 0:
-                logging.warning(f"Duplicate positions found in molecule {path}. Deleting {len(duplicate_indices)} atoms.")
-                mol = remove_atoms(mol, [int(i) for i in duplicate_indices])
-        # we infer the bonds if requested
-        if proximityBonding:
-            mol = proximity_bond(mol, as_property_mol=as_property_mol, verbose=verbose)
-            #rdmolops.RemoveHs(mol, implicitOnly=False, updateExplicitCount=False, sanitize=False) # TODO: why was this here?
+        xyz_blocks = _read_xyz_blocks(path)
+        if len(xyz_blocks) == 0:
+            raise ValueError(f"No XYZ entries found in {path}")
 
-        # finally we use the reference molecule to copy the bonds if sensible
-        if not (reference_molecule is None):
-            if not proximityBonding:
-                raise ValueError("Reference molecule provided but proximity bonding not requested.")
-            if not type(reference_molecule) == list:
-                reference_molecule = [reference_molecule]
-            mol = reduce_to_templates(mol, reference_molecule)
+        reference_molecules = reference_molecule
+        if reference_molecules is not None and not type(reference_molecules) == list:
+            reference_molecules = [reference_molecules]
 
-    return [mol]
+        for frame_idx, (comment, xyz_block) in enumerate(xyz_blocks):
+            mol = Chem.MolFromXYZBlock(xyz_block)
+            if mol is None:
+                raise ValueError(f"Could not parse XYZ frame {frame_idx} from {path}")
+
+            if comment:
+                mol.SetProp("_Name", comment)
+
+            if duplicate_check:
+                duplicate_indices = get_duplicate_positions(mol)
+                if len(duplicate_indices) > 0:
+                    logging.warning(f"Duplicate positions found in molecule {path} frame {frame_idx}. Deleting {len(duplicate_indices)} atoms.")
+                    mol = remove_atoms(mol, [int(i) for i in duplicate_indices])
+            # we infer the bonds if requested
+            if proximityBonding:
+                mol = proximity_bond(mol, as_property_mol=as_property_mol, verbose=verbose)
+                #rdmolops.RemoveHs(mol, implicitOnly=False, updateExplicitCount=False, sanitize=False) # TODO: why was this here?
+
+            # finally we use the reference molecule to copy the bonds if sensible
+            if reference_molecules is not None:
+                if not proximityBonding:
+                    raise ValueError("Reference molecule provided but proximity bonding not requested.")
+                mol = reduce_to_templates(mol, reference_molecules)
+
+            molecules.append(mol)
+
+    return molecules
 
 
 def reduce_to_templates(mol, reference_molecules, copy_bond_order = True):
@@ -742,16 +804,17 @@ def read_orca_inp_file(path, reference_molecule=None, proximityBonding=True, as_
     
     for i, line in enumerate(lines):
         stripped = line.strip()
+        parts = stripped.split()
+        directive = "".join(parts[:2]).lower() if parts and parts[0] == "*" else stripped.lower()
         # Check for * xyzfile or *xyzfile pattern first (more specific)
-        if stripped.startswith('* xyzfile') or stripped.startswith('*xyzfile'):
+        if directive.startswith('*xyzfile'):
             # Extract the filename (format: * xyzfile <charge> <multiplicity> <filename>)
-            parts = stripped.split()
             if len(parts) >= 4:
                 # Filename is the last part after charge and multiplicity
                 xyzfile_pattern = parts[-1]
             break
-        # Check for *xyz pattern (inline coordinates)
-        elif stripped.startswith('*xyz'):
+        # Check for *xyz or * xyz pattern (inline coordinates)
+        elif directive.startswith('*xyz'):
             xyz_start_idx = i + 1  # Start reading from next line
             # Look for the closing *
             for j in range(i + 1, len(lines)):
