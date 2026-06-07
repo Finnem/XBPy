@@ -72,18 +72,33 @@ __all__ = [
 
 
 # ==============================================================================
-# LEDAW IMPORT (Vendored)
+# LEDAW IMPORT (Vendored, lazy)
 # ==============================================================================
-# Import LEDAW from vendored location
-# LEDAW is bundled in xbpy._vendor.ledaw_package for ease of use
+# LEDAW is bundled in xbpy._vendor.ledaw_package, but its transitive deps
+# (notably openpyxl) are heavy and pull in XML / C extensions that can clash
+# with rdkit / numpy when loaded eagerly at module import time.  Defer the
+# import to the first call that actually drives LEDAW, so callers that only
+# need the lightweight ORCA parsers (parse_orca_fragments,
+# determine_fragment_groups, ...) can import xbpy.orcautil without paying the
+# cost (or risk).
+_LEDAW_ENGINE = None
+_LEDAW_AVAILABLE = None  # tri-state: None=not yet attempted, True/False=resolved
+_LEDAW_IMPORT_ERROR = ""
 
-try:
-    from xbpy._vendor.ledaw_package import engine_LED_N_body as _LEDAW_ENGINE
-    _LEDAW_AVAILABLE = True
-except ImportError as e:
-    _LEDAW_ENGINE = None
-    _LEDAW_AVAILABLE = False
-    _LEDAW_IMPORT_ERROR = str(e)
+
+def _resolve_ledaw():
+    """Lazy-import the vendored LEDAW engine.  Idempotent and thread-safe-enough."""
+    global _LEDAW_ENGINE, _LEDAW_AVAILABLE, _LEDAW_IMPORT_ERROR
+    if _LEDAW_AVAILABLE is not None:
+        return
+    try:
+        from xbpy._vendor.ledaw_package import engine_LED_N_body as _engine
+        _LEDAW_ENGINE = _engine
+        _LEDAW_AVAILABLE = True
+    except Exception as e:  # noqa: BLE001 - openpyxl/expat segfaults can surface as ImportError or worse
+        _LEDAW_ENGINE = None
+        _LEDAW_AVAILABLE = False
+        _LEDAW_IMPORT_ERROR = str(e)
 
 
 # ==============================================================================
@@ -345,10 +360,11 @@ def _run_ledaw(
     if verbose:
         print(f"[CHECKPOINT 3] Output directory: {output_dir}")
     
-    # Check LEDAW availability
+    # Check LEDAW availability (lazy resolution -- imports openpyxl etc. on first call)
     if verbose:
         print(f"[CHECKPOINT 4] Checking LEDAW availability...")
-    
+
+    _resolve_ledaw()
     if not _LEDAW_AVAILABLE:
         error_msg = (
             "\n" + "="*80 + "\n"
@@ -1019,11 +1035,12 @@ def compute_fp_led_interactions_with_mapping(
     """
     import tempfile
     import shutil
+    _resolve_ledaw()
     from xbpy._vendor.ledaw_package.nbody_engine import (
         construct_label_mappings as _original_construct_label_mappings,
         normalize_path
     )
-    
+
     if not _LEDAW_AVAILABLE:
         raise ImportError(f"LEDAW not available: {_LEDAW_IMPORT_ERROR}")
     
