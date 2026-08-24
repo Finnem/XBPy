@@ -160,6 +160,18 @@ def benzene_chloride():
     return build_molecule(["C"] * 6 + ["H"] * 6 + ["Cl"], benzene_bonds(), positions)
 
 
+def halobenzene(halogen):
+    """Benzene with one hydrogen swapped for a halogen.
+
+    Every halogen gets exactly the same geometry, so the only difference between
+    these molecules is which member of the group carries the substituent.
+    """
+    positions = benzene_geometry()
+    positions[6] = positions[6] / np.linalg.norm(positions[6]) * 3.10
+    symbols = ["C"] * 6 + [halogen] + ["H"] * 5
+    return build_molecule(symbols, benzene_bonds(), positions)
+
+
 def chloride_pair():
     """Two chlorides that no invariant descriptor can tell apart."""
     return build_molecule(["Cl", "Cl"], [], [(1.0, 0.0, 0.0), (5.0, 0.0, 0.0)])
@@ -333,6 +345,46 @@ def test_origin_is_used_only_once_the_invariants_are_exhausted():
 # --------------------------------------------------------------------------- #
 # atom ordering inside a fragment
 # --------------------------------------------------------------------------- #
+
+
+HALOGENS = ["F", "Cl", "Br", "I"]
+
+
+@pytest.mark.parametrize("halogen", HALOGENS)
+def test_halogen_of_a_halobenzene_lands_at_the_same_index(halogen):
+    mol = halobenzene(halogen)
+    # the halogen is the only atom of its group and the group leads the chemistry,
+    # so it heads the ordering whichever halogen it happens to be
+    assert unique_index(mol)[6] == 0
+
+
+def test_whole_halobenzene_order_is_the_same_across_the_group():
+    orders = {halogen: tuple(unique_index(halobenzene(halogen))) for halogen in HALOGENS}
+    assert len(set(orders.values())) == 1, orders
+
+
+def test_group_outranks_the_atomic_number():
+    """A pnictogen sits behind a chalcogen even when it is the heavier atom.
+
+    Ordering by atomic number would put phosphorus before oxygen but nitrogen
+    behind it, so the group of an atom would depend on its partner.
+    """
+    positions = [(0.0, 0.0, 0.0), (1.4, 0.0, 0.0)]
+    for pnictogen in ("N", "P"):
+        mol = build_molecule([pnictogen, "O"], [(0, 1, SINGLE)], positions)
+        index = unique_index(mol)
+        assert index[1] == 0, pnictogen  # the oxygen leads
+        assert index[0] == 1, pnictogen
+
+
+def test_same_group_elements_stay_distinguishable():
+    """Sharing a group must not make two elements interchangeable."""
+    positions = [(0.0, 0.0, 0.0), (1.7, 0.0, 0.0), (-1.7, 0.2, 0.0)]
+    mol = build_molecule(["C", "Cl", "Br"], [(0, 1, SINGLE), (0, 2, SINGLE)], positions)
+    order = canonical_order(mol)
+    assert not order.atom_placement_fallback
+    # the heavier halogen first, then the lighter one, then the carbon
+    assert list(order.index) == [2, 1, 0]
 
 
 def test_bond_order_is_part_of_the_atom_chemistry():

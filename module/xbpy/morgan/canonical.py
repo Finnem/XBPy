@@ -9,7 +9,9 @@ not SE(3)-complete; the signed volume rung is what removes the reflection.
 Fragments (connected components) are ordered by
 
 1. fragment chemistry -- size plus the Weisfeiler-Lehman refinement of the atom
-   chemistry, so graph topology and element/bond identity,
+   chemistry, so graph topology and element/bond identity.  Elements are led by
+   their periodic group rather than their atomic number, which keeps a
+   substituent at the same index across the group,
 2. the distances to the *other* fragments, visited in the order of the fragment
    classes that are already distinguishable from the tied group and iterated to
    a fixed point, so that a group whose members only become separable after some
@@ -363,12 +365,32 @@ def _ensure_cached_properties(mol):
         Chem.FastFindRings(mol)
 
 
+_PERIODIC_TABLE = Chem.GetPeriodicTable()
+_OUTER_ELECTRONS = {}
+
+
+def _periodic_group(atomic_number):
+    """The valence electron count, which is the periodic group of a main-group element.
+
+    Leading with this rather than with the atomic number is what keeps a
+    substituent from a given group at the same canonical index no matter which
+    member of the group it is, so the halogen of a halobenzene always lands in
+    the same place.  For the d-block it is only an approximation of the group,
+    but the atomic number still follows as a tie-break, so elements are never
+    conflated -- only their position in the order is shared.
+    """
+    if atomic_number not in _OUTER_ELECTRONS:
+        _OUTER_ELECTRONS[atomic_number] = _PERIODIC_TABLE.GetNOuterElecs(atomic_number)
+    return _OUTER_ELECTRONS[atomic_number]
+
+
 def _atom_invariants(mol):
     """Per-atom chemistry, signed so that a smaller row sorts first."""
     rows = []
     for atom in mol.GetAtoms():
         rows.append(
             [
+                -_periodic_group(atom.GetAtomicNum()),
                 -atom.GetAtomicNum(),
                 -atom.GetTotalDegree(),
                 -atom.GetTotalNumHs(includeNeighbors=True),
