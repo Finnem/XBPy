@@ -24,10 +24,19 @@ Atoms inside a fragment follow the same principle
 1. atom chemistry refined by Weisfeiler-Lehman relaxation,
 2. intra-fragment distance geometry, again with the tied class visited last,
 3. inter-fragment distance geometry,
-4. signed volumes against a canonical frame, which is what separates atoms that
-   are related by a mirror image but not by any rotation,
-5. the distance to the coordinate origin and then the raw coordinates -- the only
-   SE(3)-dependent rungs.
+4. signed volumes against a frame built from the fragment itself, which is what
+   separates atoms related by a mirror image but not by any rotation,
+5. signed volumes against a frame anchored on the partners of the complex, which
+   is what separates the two sides of a planar ring,
+6. the position in an internal frame, and only in the laboratory frame when no
+   internal frame exists -- the SE(3)-dependent rung.
+
+The last rung is reached only for a group whose members some proper symmetry of
+the structure exchanges.  For such a group no ordering exists that is invariant
+under rigid motion, because an isometry that maps the structure onto itself while
+swapping two atoms forces every invariant descriptor to agree on them.  What does
+stay fixed is which indices the group occupies, not which of its members takes
+which index.
 
 ``decimals`` controls the tolerance at which two distances count as equal.  Ties
 that survive even the coordinates are broken by the input atom index, which
@@ -301,48 +310,81 @@ def _grouped_distance_descriptor(distances, column_labels, row_class=None):
     return np.column_stack([other, own])
 
 
-def _chirality_descriptor(points, labels, decimals):
-    """Signed volumes against a canonical frame, or None if no frame exists.
+def _class_centroids(points, labels):
+    """One point per class, in ascending class order."""
+    return np.array([points[members].mean(axis=0) for _, members in _class_groups(labels)])
+
+
+def _first_independent_triple(candidates):
+    """The first three candidate points that span a plane, in the order given."""
+    candidates = np.asarray(candidates, dtype=float)
+    if len(candidates) < 3:
+        return None
+
+    origin = candidates[0]
+    first = None
+    for candidate in candidates[1:]:
+        offset = candidate - origin
+        if np.linalg.norm(offset) < _DEGENERACY_TOLERANCE:
+            continue
+        if first is None:
+            first = candidate
+            continue
+        if np.linalg.norm(np.cross(first - origin, offset)) > _DEGENERACY_TOLERANCE:
+            return origin, first, candidate
+    return None
+
+
+def _chirality_descriptor(points, candidates, decimals):
+    """Signed volumes against a frame taken from `candidates`, or None if degenerate.
 
     The value is invariant under rotation and translation but changes sign under
     a reflection, which is what distinguishes points that distance geometry
-    alone cannot tell apart.
+    alone cannot tell apart.  Feeding in anchors from outside the fragment lets
+    the partners of a complex break a mirror that the fragment cannot break on
+    its own, and it does so without leaving SE(3).
     """
-    frame = _reference_frame(points, labels)
-    if frame is None:
+    triple = _first_independent_triple(candidates)
+    if triple is None:
         return None
-    origin, first, second = frame
+    origin, first, second = triple
     normal = np.cross(first - origin, second - origin)
     return np.round((points - origin) @ normal, decimals).reshape(-1, 1)
 
 
-def _reference_frame(points, labels):
-    """The first three affinely independent class centroids, in class order."""
-    groups = _class_groups(labels)
-    if len(groups) < 3:
+def _internal_frame(candidates):
+    """An orthonormal frame anchored on `candidates`, or None if they are degenerate."""
+    triple = _first_independent_triple(candidates)
+    if triple is None:
         return None
-
-    origin = None
-    first = None
-    for _, members in groups:
-        centroid = points[members].mean(axis=0)
-        if origin is None:
-            origin = centroid
-            continue
-        offset = centroid - origin
-        if np.linalg.norm(offset) < _DEGENERACY_TOLERANCE:
-            continue
-        if first is None:
-            first = centroid
-            continue
-        if np.linalg.norm(np.cross(first - origin, offset)) > _DEGENERACY_TOLERANCE:
-            return origin, first, centroid
-    return None
+    origin, first, second = triple
+    forward = first - origin
+    forward = forward / np.linalg.norm(forward)
+    normal = np.cross(forward, second - origin)
+    normal = normal / np.linalg.norm(normal)
+    return origin, np.stack([forward, np.cross(normal, forward), normal])
 
 
-def _placement_descriptor(points, decimals):
-    """Distance to the coordinate origin, then the coordinates themselves."""
+def _frame_origin(candidates):
+    frame = None if candidates is None else _internal_frame(candidates)
+    return np.zeros(3) if frame is None else frame[0]
+
+
+def _placement_descriptor(points, decimals, candidates=None):
+    """Where a point sits, measured in an internal frame whenever one exists.
+
+    This is the only rung that depends on where the structure happens to lie in
+    space, so it is worth spending a frame built from the structure itself to
+    keep it from mattering.  Falling back to the laboratory frame is a real loss
+    of invariance, but it only happens when the candidates are degenerate, and a
+    group whose members a proper symmetry exchanges cannot be ordered by any
+    frame anyway: no function of the geometry tells its members apart.
+    """
     points = np.asarray(points, dtype=float)
+    frame = None if candidates is None else _internal_frame(candidates)
+    if frame is not None:
+        origin, axes = frame
+        points = (points - origin) @ axes.T
     return np.column_stack(
         [np.round(np.linalg.norm(points, axis=1), decimals), np.round(points, decimals)]
     )
@@ -558,9 +600,6 @@ def _fragment_signatures(fragments, chemistry):
 
 def _fragment_order(fragments, positions, chemistry, decimals, budget):
     centroids = np.array([positions[fragment].mean(axis=0) for fragment in fragments])
-    closest_to_origin = np.round(
-        [np.linalg.norm(positions[fragment], axis=1).min() for fragment in fragments], decimals
-    )
 
     def geometry(labels):
         rows = _tied_rows(labels)
@@ -579,10 +618,17 @@ def _fragment_order(fragments, positions, chemistry, decimals, budget):
         return _scatter_rows(np.column_stack(blocks), rows, len(fragments))
 
     def chirality(labels):
-        return _chirality_descriptor(centroids, labels, decimals)
+        return _chirality_descriptor(centroids, _class_centroids(centroids, labels), decimals)
 
     def placement(labels):
-        return np.column_stack([closest_to_origin, _placement_descriptor(centroids, decimals)])
+        candidates = _class_centroids(centroids, labels)
+        origin = _frame_origin(candidates)
+        closest = np.round(
+            [np.linalg.norm(positions[f] - origin, axis=1).min() for f in fragments], decimals
+        )
+        return np.column_stack(
+            [closest, _placement_descriptor(centroids, decimals, candidates)]
+        )
 
     return _order(
         _fragment_signatures(fragments, chemistry),
@@ -610,30 +656,54 @@ def _atom_order(rank, ordered_fragments, positions, chemistry, decimals, budget,
         descriptor = _grouped_distance_descriptor(distances, labels, labels[rows])
         return None if descriptor is None else _scatter_rows(descriptor, rows, n_own)
 
+    # group the outside atoms by canonical fragment rank and then by chemistry, both
+    # of which are fixed before any atom inside this fragment is ordered.  Several
+    # rungs want this, and building it costs a pass over the rest of the molecule
+    outside_cache = []
+
+    def outside_groups():
+        if not outside_cache:
+            outside = ordered_fragments[:rank] + ordered_fragments[rank + 1 :]
+            columns = np.concatenate(outside)
+            ranks = np.concatenate([np.full(len(f), i) for i, f in enumerate(outside)])
+            groups = _dense_rank(np.column_stack([ranks, chemistry[columns]]))
+            outside_cache.append((columns, groups, _class_centroids(positions[columns], groups)))
+        return outside_cache[0]
+
     def inter(labels):
         rows = _tied_rows(labels)
         if len(rows) == 0:
             return None
-        # group the outside atoms by canonical fragment rank and then by chemistry,
-        # both of which are fixed before any atom inside this fragment is ordered
-        outside = ordered_fragments[:rank] + ordered_fragments[rank + 1 :]
-        columns = np.concatenate(outside)
-        ranks = np.concatenate([np.full(len(f), i) for i, f in enumerate(outside)])
-        column_labels = _dense_rank(np.column_stack([ranks, chemistry[columns]]))
+        columns, groups, _ = outside_groups()
         distances = _distance_block(positions, fragment[rows], columns, decimals)
-        descriptor = _grouped_distance_descriptor(distances, column_labels)
+        descriptor = _grouped_distance_descriptor(distances, groups)
         return None if descriptor is None else _scatter_rows(descriptor, rows, n_own)
 
     def chirality(labels):
-        return _chirality_descriptor(fragment_positions, labels, decimals)
+        candidates = _class_centroids(fragment_positions, labels)
+        return _chirality_descriptor(fragment_positions, candidates, decimals)
+
+    def complex_chirality(labels):
+        # a planar ring cannot break its own mirror, because the rotation that
+        # exchanges two of its atoms is a symmetry of the fragment.  Anchoring the
+        # frame on the partners of the complex breaks it, and every partner that
+        # sits off the mirror plane does so even when its distances to the two
+        # atoms are exactly equal
+        own = _class_centroids(fragment_positions, labels)
+        candidates = np.concatenate([own, outside_groups()[2]])
+        return _chirality_descriptor(fragment_positions, candidates, decimals)
 
     def placement(labels):
-        return _placement_descriptor(fragment_positions, decimals)
+        candidates = _class_centroids(fragment_positions, labels)
+        if allow_inter and n_outside:
+            candidates = np.concatenate([candidates, outside_groups()[2]])
+        return _placement_descriptor(fragment_positions, decimals, candidates)
 
     stages = [intra]
     if allow_inter and n_outside:
-        stages.append(inter)
-    stages.append(chirality)
+        stages.extend([inter, chirality, complex_chirality])
+    else:
+        stages.append(chirality)
 
     return _order(
         chemistry[fragment], stages, [placement], np.asarray(fragment, dtype=float)

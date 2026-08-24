@@ -11,10 +11,11 @@ from rdkit import Chem
 from rdkit.Geometry import Point3D
 
 from xbpy.morgan import canonical_order, unique_index
-from xbpy.morgan.canonical import _weisfeiler_lehman_labels
+from xbpy.morgan.canonical import _placement_descriptor, _weisfeiler_lehman_labels
 
 SINGLE = Chem.BondType.SINGLE
 DOUBLE = Chem.BondType.DOUBLE
+AROMATIC = Chem.BondType.AROMATIC
 
 
 # --------------------------------------------------------------------------- #
@@ -22,17 +23,19 @@ DOUBLE = Chem.BondType.DOUBLE
 # --------------------------------------------------------------------------- #
 
 
-def build_molecule(symbols, bonds, positions):
+def build_molecule(symbols, bonds, positions, aromatic_atoms=()):
     """Build a molecule with explicit hydrogens and one conformer.
 
     Every atom gets an atom map number that survives renumbering, which is what
     lets the tests talk about physical atoms instead of atom indices.
     """
+    aromatic_atoms = set(aromatic_atoms)
     mol = Chem.RWMol()
     for i, symbol in enumerate(symbols):
         atom = Chem.Atom(symbol)
         atom.SetNoImplicit(True)
         atom.SetAtomMapNum(i + 1)
+        atom.SetIsAromatic(i in aromatic_atoms)
         mol.AddAtom(atom)
     for begin, end, bond_type in bonds:
         mol.AddBond(begin, end, bond_type)
@@ -172,6 +175,32 @@ def halobenzene(halogen):
     return build_molecule(symbols, benzene_bonds(), positions)
 
 
+def aromatic_chlorobenzene(partner=None):
+    """Chlorobenzene as a real aromatic ring, optionally facing a partner fragment.
+
+    A Kekule ring would cheat: alternating bonds make the two ortho carbons
+    differ topologically.  With aromatic bonds, as any sanitised molecule has
+    them, the rotation by half a turn about the chlorine axis is a symmetry of
+    the fragment and exchanges them, so the fragment alone cannot order them.
+
+    The partner sits above the ring plane, off the mirror but at equal distance
+    from both ortho carbons.
+    """
+    positions = benzene_geometry()
+    positions[6] = positions[6] / np.linalg.norm(positions[6]) * 3.10
+    symbols = ["C"] * 6 + ["Cl"] + ["H"] * 5
+    if partner is not None:
+        positions = np.concatenate([positions, [partner]])
+        symbols = symbols + ["Ne"]
+    ring = [(i, (i + 1) % 6, AROMATIC) for i in range(6)]
+    bonds = ring + [(i, 6 + i, SINGLE) for i in range(6)]
+    return build_molecule(symbols, bonds, positions, aromatic_atoms=range(6))
+
+
+def stacked_chlorobenzene():
+    return aromatic_chlorobenzene(partner=(0.4, 0.0, 3.3))
+
+
 def chloride_pair():
     """Two chlorides that no invariant descriptor can tell apart."""
     return build_molecule(["Cl", "Cl"], [], [(1.0, 0.0, 0.0), (5.0, 0.0, 0.0)])
@@ -207,6 +236,8 @@ MOLECULES = {
     "chloride_pair": chloride_pair,
     "anchored_chlorides": anchored_chlorides,
     "benzene_and_water": benzene_and_water,
+    "aromatic_chlorobenzene": aromatic_chlorobenzene,
+    "stacked_chlorobenzene": stacked_chlorobenzene,
 }
 
 # molecules that the rotation- and translation-invariant rungs resolve completely
@@ -216,6 +247,7 @@ INVARIANT_MOLECULES = [
     "benzene_chloride",
     "anchored_chlorides",
     "benzene_and_water",
+    "stacked_chlorobenzene",
 ]
 
 
@@ -465,6 +497,106 @@ def test_rotation_does_not_exchange_mirror_image_hydrogens(seed):
     mol = chlorofluoromethane()
     rotated = moved(mol, rotation(seed), np.random.RandomState(seed).uniform(-5.0, 5.0, size=3))
     assert canonical_labels(rotated) == canonical_labels(mol)
+
+
+# --------------------------------------------------------------------------- #
+# planar rings
+# --------------------------------------------------------------------------- #
+
+
+def test_a_planar_ring_cannot_break_its_own_mirror():
+    """The premise of the two rungs below: the fragment alone runs out of descriptors.
+
+    Half a turn about the chlorine axis is a proper symmetry of the flat ring and
+    exchanges the two ortho carbons, so they share every distance, and the class
+    centroids all sit on that axis, so no frame can be built from the ring.
+    """
+    mol = aromatic_chlorobenzene()
+    positions = coordinates(mol)
+    chemistry = _weisfeiler_lehman_labels(mol)
+
+    assert chemistry[1] == chemistry[5]
+    distances = np.linalg.norm(positions[:, None] - positions[None], axis=2)
+    assert np.allclose(np.sort(distances[1]), np.sort(distances[5]))
+    assert canonical_order(mol).atom_placement_fallback
+
+
+def test_a_partner_fragment_breaks_the_ring_mirror():
+    mol = stacked_chlorobenzene()
+    positions = coordinates(mol)
+
+    # the partner is off the mirror plane, yet exactly equidistant from the two
+    # ortho carbons, so no distance to it can order them either
+    assert np.linalg.norm(positions[1] - positions[12]) == pytest.approx(
+        np.linalg.norm(positions[5] - positions[12])
+    )
+    # anchoring the frame on the partner turns that into a difference in sign
+    order = canonical_order(mol)
+    assert not order.atom_placement_fallback
+    assert order.index[1] != order.index[5]
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_the_stacked_ring_order_survives_rigid_motion(seed):
+    mol = stacked_chlorobenzene()
+    translation = np.random.RandomState(seed + 11).uniform(-15.0, 15.0, size=3)
+    assert canonical_labels(moved(mol, rotation(seed), translation)) == canonical_labels(mol)
+
+
+def test_moving_the_partner_through_the_ring_plane_exchanges_the_ortho_carbons():
+    """The rung has to be sensitive to the side the partner sits on, and only that."""
+    above = canonical_order(aromatic_chlorobenzene(partner=(0.4, 0.0, 3.3))).index
+    below = canonical_order(aromatic_chlorobenzene(partner=(0.4, 0.0, -3.3))).index
+
+    assert above[1] == below[5] and above[5] == below[1]
+    unaffected = [0, 3, 6, 9, 12]  # the atoms on the mirror plane keep their place
+    assert list(above[unaffected]) == list(below[unaffected])
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_the_isolated_ring_keeps_its_symmetry_orbits_in_place(seed):
+    """What an exchanged pair can still promise once every descriptor is spent.
+
+    No ordering of the two ortho carbons is invariant under rigid motion, since
+    a symmetry of the ring swaps them and therefore forces every invariant
+    descriptor to agree on them.  The indices the pair occupies stay fixed, only
+    the choice of which carbon takes which does not.
+    """
+    mol = aromatic_chlorobenzene()
+    chemistry = _weisfeiler_lehman_labels(mol)
+
+    def orbits(molecule):
+        index = unique_index(molecule)
+        return {c: tuple(sorted(index[chemistry == c])) for c in np.unique(chemistry)}
+
+    translation = np.random.RandomState(seed + 5).uniform(-15.0, 15.0, size=3)
+    assert orbits(moved(mol, rotation(seed), translation)) == orbits(mol)
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_placement_in_an_internal_frame_survives_rigid_motion(seed):
+    """The last rung stops depending on the laboratory frame once it has anchors."""
+    points = np.array(
+        [[0.0, 0.0, 0.0], [1.5, 0.2, 0.0], [0.3, 2.0, 0.4], [-1.0, 0.5, 1.7], [2.2, -0.8, 0.9]]
+    )
+    matrix = rotation(seed)
+    moved_points = points @ matrix.T + np.array([9.0, -4.0, 2.5])
+
+    anchored = _placement_descriptor(points, 4, points[:3])
+    moved_anchored = _placement_descriptor(moved_points, 4, moved_points[:3])
+    assert np.allclose(anchored, moved_anchored, atol=1e-3)
+
+    # without anchors the very same rung moves with the molecule
+    assert not np.allclose(
+        _placement_descriptor(points, 4), _placement_descriptor(moved_points, 4), atol=1e-3
+    )
+
+
+def test_placement_falls_back_to_the_laboratory_frame_for_degenerate_anchors():
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    assert np.allclose(
+        _placement_descriptor(points, 4, points), _placement_descriptor(points, 4)
+    )
 
 
 # --------------------------------------------------------------------------- #
