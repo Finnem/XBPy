@@ -93,7 +93,7 @@ def canonical_order(mol, decimals=DEFAULT_DECIMALS, max_distance_cells=DEFAULT_M
 
     _ensure_cached_properties(mol)
     positions = np.array(mol.GetConformer().GetPositions(), dtype=float)
-    chemistry = _weisfeiler_lehman_labels(mol)
+    chemistry = _weisfeiler_lehman_labels(_with_perceived_aromaticity(mol), decimals)
     fragments = _connected_components(mol)
     budget = _Budget(max_distance_cells)
 
@@ -405,6 +405,30 @@ def _ensure_cached_properties(mol):
         initialized = False
     if not initialized:
         Chem.FastFindRings(mol)
+
+
+_AROMATICITY_OPS = Chem.SanitizeFlags.SANITIZE_SYMMRINGS | Chem.SanitizeFlags.SANITIZE_SETAROMATICITY
+
+
+def _with_perceived_aromaticity(mol):
+    """A copy of `mol` whose aromatic rings are flagged, or `mol` if that fails.
+
+    The two Kekule structures of one ring are the same molecule, but they write
+    the double bonds in different places, so chemistry read straight off the bond
+    orders makes the same ring look different depending on which structure a file
+    happens to carry.  Perceiving aromaticity collapses both onto one answer.
+    Anything that will not sanitize keeps its literal bond orders, which is no
+    worse than reading them directly.
+    """
+    working = Chem.Mol(mol)
+    try:
+        failed = Chem.SanitizeMol(working, sanitizeOps=_AROMATICITY_OPS, catchErrors=True)
+    except Exception:
+        return mol
+    if failed != Chem.SanitizeFlags.SANITIZE_NONE:
+        return mol
+    _ensure_cached_properties(working)
+    return working
 
 
 _PERIODIC_TABLE = Chem.GetPeriodicTable()

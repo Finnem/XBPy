@@ -201,6 +201,20 @@ def stacked_chlorobenzene():
     return aromatic_chlorobenzene(partner=(0.4, 0.0, 3.3))
 
 
+def kekulized_chlorobenzene(shift):
+    """Chlorobenzene with the ring double bonds written from `shift` onwards.
+
+    Both values of `shift` describe the same molecule.  A file only records which
+    of the two resonance structures whoever wrote it happened to pick, so the two
+    have to come out of the ordering the same way.
+    """
+    positions = benzene_geometry()
+    positions[6] = positions[6] / np.linalg.norm(positions[6]) * 3.10
+    ring = [(i, (i + 1) % 6, DOUBLE if (i + shift) % 2 == 0 else SINGLE) for i in range(6)]
+    bonds = ring + [(i, 6 + i, SINGLE) for i in range(6)]
+    return build_molecule(["C"] * 6 + ["Cl"] + ["H"] * 5, bonds, positions)
+
+
 def chloride_pair():
     """Two chlorides that no invariant descriptor can tell apart."""
     return build_molecule(["Cl", "Cl"], [], [(1.0, 0.0, 0.0), (5.0, 0.0, 0.0)])
@@ -502,6 +516,30 @@ def test_rotation_does_not_exchange_mirror_image_hydrogens(seed):
 # --------------------------------------------------------------------------- #
 # planar rings
 # --------------------------------------------------------------------------- #
+
+
+def test_the_written_kekule_structure_does_not_change_the_order():
+    """The bond orders of a ring record a resonance structure, not a difference.
+
+    Two files of one docked ligand can disagree on where the double bonds sit,
+    and reading them literally hands the same ring two different orders.
+    """
+    first = kekulized_chlorobenzene(0)
+    second = kekulized_chlorobenzene(1)
+
+    ring_bonds = lambda mol: sorted(
+        (b.GetBeginAtomIdx(), b.GetEndAtomIdx(), b.GetBondTypeAsDouble())
+        for b in mol.GetBonds()
+        if b.GetBeginAtomIdx() < 6 and b.GetEndAtomIdx() < 6
+    )
+    assert ring_bonds(first) != ring_bonds(second)
+    assert canonical_labels(first) == canonical_labels(second)
+
+
+def test_a_kekulized_ring_and_an_aromatic_ring_agree():
+    assert canonical_labels(kekulized_chlorobenzene(0)) == canonical_labels(
+        aromatic_chlorobenzene()
+    )
 
 
 def test_a_planar_ring_cannot_break_its_own_mirror():
