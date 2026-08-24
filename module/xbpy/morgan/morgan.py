@@ -7,35 +7,26 @@ from collections import defaultdict
 import logging
 
 from ..rdutil import position
+from .canonical import DEFAULT_DECIMALS, canonical_order
 
-def unique_index(mol):
-    connected_components, component_distances = _connected_components(mol, return_min_distance=True)
+def unique_index(mol, decimals = DEFAULT_DECIMALS):
+    """Assign every atom a canonical index.
 
+    Fragments are ordered by their chemistry first, then by their distances to
+    the fragments they are already distinguishable from, and only fall back to
+    the placement in space when no rotation- and translation-invariant
+    descriptor is left. Atoms inside a fragment follow the same ladder. See
+    :mod:`xbpy.morgan.canonical` for the full description.
 
-    original_scores = []
-    orders = []
-    # determine scores for each connected component
-    for connected_component in connected_components:
-        original_scores.append(morgan_prop(mol, connected_component))
-        # resolve ambiguities
-        order = rankdata(-np.round(original_scores[-1], 4), method="min") - 1
-        orders.append(resolve_ambiguity([mol.GetAtomWithIdx(i) for i in connected_component], order))
+    Args:
+        mol (rdkit.Chem.Mol): Molecule with at least one conformer.
+        decimals (int): Tolerance for comparing distances, as a number of decimals.
 
-    # sort connected components based on scores. For some reason, lexsort sorts from last to first
-    max_len = max([len(s) for s in original_scores])
-    padded_scores = np.array([sorted(np.pad(s, (0, max_len - len(s)), mode="constant", constant_values=0)) for s in original_scores])
+    Returns:
+        np.ndarray: Canonical index per atom, always a permutation of ``range(N)``.
 
-    # append distances as first column
-    padded_scores = np.concatenate([np.array(component_distances).reshape(-1, 1), padded_scores], axis=1)
-    component_order = np.lexsort(np.array([list(reversed(s)) for s in padded_scores]).T)
-
-    new_index = np.zeros(mol.GetNumAtoms(), dtype=int)
-    # determine final order
-    cur_index_offset = 0
-    for i in component_order:
-        new_index[connected_components[i]] = orders[i] + cur_index_offset
-        cur_index_offset += len(connected_components[i])    
-    return new_index
+    """
+    return canonical_order(mol, decimals=decimals).index
 
 def _connected_components(mol, return_min_distance = False):
     considered_indices = set(range(mol.GetNumAtoms()))
